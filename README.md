@@ -14,6 +14,6 @@ Run the prompt from anywhere inside the target Git repository. The CLI resolves 
 
 Use `unclog-bridge follow` to resume, `unclog-bridge status` to check the connection, `unclog-bridge doctor` to inspect local prerequisites, and either `unclog-bridge logout` or `unclog-bridge revoke` to revoke the current device immediately.
 
-The setup intent and fallback code are short-lived pairing material. Never paste a device session token into a prompt or configuration file.
+The setup intent and one-time approval link are short-lived pairing material. Internal device codes travel automatically between the bridge and hosted service; customers do not type or copy a code on the normal path. Never paste a device session token into a prompt or configuration file.
 
 Releases are produced only by the repository's GitHub-hosted publish workflow. Version `1.0.0` uses a one-time npm token bootstrap because a package must exist before npm trusted publishing can be configured. Later releases use the same workflow through npm OIDC trusted publishing; no long-lived publish token is required.
