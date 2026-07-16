@@ -1350,10 +1350,13 @@ async function postDeviceJson(activeFetch, apiBaseUrl, endpoint, body) {
 
 function installHostedAdapter(tool, homeDir = os.homedir()) {
   const marker = "<!-- unclog-hosted-adapter-v1 -->";
-  const content = `${marker}\n# Hosted Unclog\n\nUse only the published \`unclog-bridge\` thin CLI. Never use a local Unclog development CLI or edit hidden Unclog state.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\` to resume the exact next hosted instruction. Treat hosted JSON fields \`next_action\` and \`commands_now\` as authoritative. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
+  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nUse only the published \`unclog-bridge\` thin CLI. Never use a local Unclog development CLI or edit hidden Unclog state.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\` to resume the exact next hosted instruction. Treat hosted JSON fields \`next_action\` and \`commands_now\` as authoritative. Do not guess the next workflow command. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
   const relative = tool === "claude"
-    ? path.join(".claude", "commands", "unclog-hosted.md")
+    ? path.join(".claude", "skills", "unclog-hosted", "SKILL.md")
     : path.join(".agents", "skills", "unclog-hosted", "SKILL.md");
+  const legacyRelative = tool === "claude"
+    ? path.join(".claude", "commands", "unclog-hosted.md")
+    : null;
   const target = path.join(homeDir, relative);
   if (fs.existsSync(target)) {
     const existing = fs.readFileSync(target, "utf8");
@@ -1363,11 +1366,20 @@ function installHostedAdapter(tool, homeDir = os.homedir()) {
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
+  let removedLegacyAdapter = false;
+  if (legacyRelative) {
+    const legacyTarget = path.join(homeDir, legacyRelative);
+    if (fs.existsSync(legacyTarget) && fs.readFileSync(legacyTarget, "utf8").includes(marker)) {
+      fs.rmSync(legacyTarget);
+      removedLegacyAdapter = true;
+    }
+  }
   return {
     tool,
     path: path.join("~", relative).replaceAll("\\", "/"),
     customerSafe: true,
-    localWorkflowFallback: false
+    localWorkflowFallback: false,
+    removedLegacyAdapter
   };
 }
 
@@ -2030,6 +2042,7 @@ module.exports = {
   createBridgeClient,
   hostedCommandStatus,
   hostedResponseContract,
+  installHostedAdapter,
   logout,
   main,
   normalizeHostedCommand,

@@ -24,6 +24,7 @@ const {
   createBridgeClient,
   hostedCommandStatus,
   hostedResponseContract,
+  installHostedAdapter,
   logout,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
@@ -889,6 +890,33 @@ test("adapter prompt is minimal and useless without server auth", async () => {
   );
 });
 
+test("customer adapters use discoverable Agent Skills paths and safely retire only owned Claude legacy files", () => {
+  const homeDir = tempStorage();
+  const legacyPath = path.join(homeDir, ".claude", "commands", "unclog-hosted.md");
+  fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+  fs.writeFileSync(legacyPath, "<!-- unclog-hosted-adapter-v1 -->\nlegacy hosted adapter\n");
+
+  const claude = installHostedAdapter("claude", homeDir);
+  const claudePath = path.join(homeDir, ".claude", "skills", "unclog-hosted", "SKILL.md");
+  assert.equal(claude.path, "~/.claude/skills/unclog-hosted/SKILL.md");
+  assert.equal(claude.removedLegacyAdapter, true);
+  assert.equal(fs.existsSync(legacyPath), false);
+  assert.match(fs.readFileSync(claudePath, "utf8"), /^---\nname: unclog-hosted\ndescription: /);
+
+  const userOwnedLegacy = path.join(homeDir, ".claude", "commands", "unclog-hosted.md");
+  fs.writeFileSync(userOwnedLegacy, "user-owned command\n");
+  const claudeRefresh = installHostedAdapter("claude", homeDir);
+  assert.equal(claudeRefresh.removedLegacyAdapter, false);
+  assert.equal(fs.readFileSync(userOwnedLegacy, "utf8"), "user-owned command\n");
+
+  const codex = installHostedAdapter("codex", homeDir);
+  assert.equal(codex.path, "~/.agents/skills/unclog-hosted/SKILL.md");
+  assert.match(
+    fs.readFileSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md"), "utf8"),
+    /follow the server-provided next action/
+  );
+});
+
 test("repository identity resolves the Git root and rejects setup outside a repository", () => {
   const root = tempStorage();
   const repo = path.join(root, "customer-repo");
@@ -1102,7 +1130,13 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.equal(loaded.deviceSessionId, "00000000-0000-4000-8000-000000000001");
   assert.equal(loaded.projectId, "proj_solo_primary");
   assert.equal(loadSession({ storageDir, cwd, allowLocalHttp: true, credentialStore }).sessionToken.startsWith("us_"), true);
-  assert.equal(fs.existsSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md")), true);
+  const adapterPath = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
+  assert.equal(fs.existsSync(adapterPath), true);
+  const adapterText = fs.readFileSync(adapterPath, "utf8");
+  assert.match(adapterText, /^---\nname: unclog-hosted\ndescription: /);
+  assert.match(adapterText, /start, continue, resume, or check Unclog work/);
+  assert.match(adapterText, /Do not guess the next workflow command/);
+  assert.match(adapterText, /<!-- unclog-hosted-adapter-v1 -->/);
   assert.equal(fs.existsSync(path.join(cwd, ".agents", "skills", "unclog-hosted", "SKILL.md")), false);
   assert.equal(statuses[0].stage, "waiting_for_dashboard_approval");
   assert.equal(statuses.some((status) => status.stage === "approval_poll_retry"), true);
