@@ -33,14 +33,16 @@ if (manifest.publishConfig?.access !== "public" || manifest.publishConfig?.prove
 for (const contract of [
   "id-token: write",
   "runs-on: ubuntu-latest",
+  "actions/checkout@v6",
+  "actions/setup-node@v6",
   "npm@11.17.0",
   "npm publish --access public --provenance",
-  "npm publish --access public",
+  '"unclog-bridge-v*"',
 ]) {
   if (!publishWorkflow.includes(contract)) throw new Error(`Missing release workflow contract: ${contract}`);
 }
-if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes("github.event_name == 'release'")) {
-  throw new Error("Release workflow must separate first-publish token bootstrap from trusted publishing.");
+if (/NPM_TOKEN|NODE_AUTH_TOKEN|workflow_dispatch|types:\s*\[published\]/.test(publishWorkflow)) {
+  throw new Error("Final release workflow must use tag-bound OIDC only, without token bootstrap or duplicate triggers.");
 }
 
 process.stdout.write("package audit passed\n");
