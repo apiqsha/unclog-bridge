@@ -1,0 +1,40 @@
+{
+  "name": "unclog-bridge",
+  "version": "1.0.0",
+  "description": "Thin local bridge for hosted Unclog commands.",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apiqsha/unclog-bridge.git"
+  },
+  "homepage": "https://unclog.dev",
+  "bugs": {
+    "url": "https://github.com/apiqsha/unclog-bridge/issues"
+  },
+  "main": "src/index.js",
+  "bin": {
+    "unclog-bridge": "src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "package:audit": "node scripts/package-audit.js",
+    "release:audit": "npm run test && npm run package:audit && npm pack --dry-run --json",
+    "prepublishOnly": "npm run test && npm run package:audit"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "1.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

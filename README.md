@@ -1,0 +1,19 @@
+# Unclog Bridge
+
+The official thin customer CLI for hosted Unclog. It contains transport, local workflow-file validation, and customer-safe adapters only; the workflow brain remains on the hosted service.
+
+The public source and release provenance for this package live at [apiqsha/unclog-bridge](https://github.com/apiqsha/unclog-bridge). The private product repository and canonical hosted controller are never included in the npm package or public release repository.
+
+Start from the exact setup prompt shown in the signed-in Unclog dashboard:
+
+```sh
+npx --yes unclog-bridge@1.0.0 connect --tool codex --setup-intent <short-lived-intent>
+```
+
+Run the prompt from anywhere inside the target Git repository. The CLI resolves the Git root, waits for dashboard approval, stores the resulting revocable session in the operating-system credential store, links that repository, and returns the first hosted instruction. On Unix-like systems only, an unavailable keyring may fall back to a verified `0700` directory and `0600` credential file outside the repository; Windows continues to require Credential Manager.
+
+Use `unclog-bridge follow` to resume, `unclog-bridge status` to check the connection, `unclog-bridge doctor` to inspect local prerequisites, and either `unclog-bridge logout` or `unclog-bridge revoke` to revoke the current device immediately.
+
+The setup intent and fallback code are short-lived pairing material. Never paste a device session token into a prompt or configuration file.
+
+Releases are produced only by the repository's GitHub-hosted publish workflow. Version `1.0.0` uses a one-time npm token bootstrap because a package must exist before npm trusted publishing can be configured. Later releases use the same workflow through npm OIDC trusted publishing; no long-lived publish token is required.
