@@ -120,14 +120,17 @@ const NORMAL_HOSTED_COMMAND_CONTRACTS = [
   "inbox.link"
 ];
 
-const NON_NORMAL_HOSTED_COMMAND_CONTRACTS = [
+const LOCAL_ONLY_COMMAND_CONTRACTS = [
   "init",
   "selftest",
   "mission.delete",
   "agents.runtime.set",
   "action-plan.add-big",
   "action-plan.add-smaller",
-  "action-plan.add-small",
+  "action-plan.add-small"
+];
+
+const REMOVED_SOCIAL_COMMAND_CONTRACTS = [
   "social.modes",
   "social.status",
   "social.candidates",
@@ -142,7 +145,12 @@ const NON_NORMAL_HOSTED_COMMAND_CONTRACTS = [
 ];
 
 const HOSTED_COMMAND_CONTRACTS = new Set(NORMAL_HOSTED_COMMAND_CONTRACTS);
-const HOSTED_UNSUPPORTED_COMMAND_CONTRACTS = new Set(NON_NORMAL_HOSTED_COMMAND_CONTRACTS);
+const HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS = new Set(LOCAL_ONLY_COMMAND_CONTRACTS);
+const HOSTED_REMOVED_COMMAND_CONTRACTS = new Set(REMOVED_SOCIAL_COMMAND_CONTRACTS);
+const HOSTED_UNSUPPORTED_COMMAND_CONTRACTS = new Set([
+  ...HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
+  ...HOSTED_REMOVED_COMMAND_CONTRACTS
+]);
 const HOSTED_LOCAL_CONTRACT_VERSION = "hosted_local_cli_parity_v1";
 const LOCAL_RESPONSE_BASE_KEYS = ["status", "next_action", "next", "commands_now", "recovery"];
 const LOCAL_STATUS_VALUES = ["OK", "REJECTED", "ERROR"];
@@ -2006,6 +2014,8 @@ if (require.main === module) {
 module.exports = {
   BridgeServerError,
   HOSTED_COMMAND_CONTRACTS,
+  HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
+  HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
   MissingAuthError,
   assertHostedCommandContract,

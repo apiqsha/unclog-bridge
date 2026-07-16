@@ -8,6 +8,8 @@ const test = require("node:test");
 const {
   BridgeServerError,
   HOSTED_COMMAND_CONTRACTS,
+  HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
+  HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
   MissingAuthError,
   assertHostedProjectLinkEnvelope,
@@ -55,6 +57,9 @@ function tempStorage() {
 }
 
 function localParserCommands() {
+  const repositoryRoot = path.resolve(__dirname, "../../..");
+  const privateParser = path.join(repositoryRoot, "codex-tools", "unclog", "unclog_lib", "cli.py");
+  if (!fs.existsSync(privateParser)) return null;
   const script = [
     "import argparse, json, sys",
     "sys.path.insert(0, 'codex-tools/unclog')",
@@ -73,7 +78,7 @@ function localParserCommands() {
   let result;
   for (const candidate of candidates) {
     result = spawnSync(candidate, ["-c", script], {
-      cwd: path.resolve(__dirname, "../../.."),
+      cwd: repositoryRoot,
       encoding: "utf8"
     });
     if (result.status === 0) break;
@@ -449,15 +454,24 @@ test("bridge only forwards hosted command contract names", async () => {
 
 test("bridge executable inventory covers the local parser and rejects removed Social commands", () => {
   const localCommands = localParserCommands();
-  const removedSocialCommands = [...HOSTED_UNSUPPORTED_COMMAND_CONTRACTS]
-    .filter((command) => command.startsWith("social."));
+  const removedSocialCommands = [...HOSTED_REMOVED_COMMAND_CONTRACTS];
   const classified = new Set([
     ...HOSTED_COMMAND_CONTRACTS,
-    ...[...HOSTED_UNSUPPORTED_COMMAND_CONTRACTS].filter((command) => !removedSocialCommands.includes(command))
+    ...HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS
   ]);
-  assert.deepEqual([...classified].sort(), localCommands);
+  assert.equal(HOSTED_COMMAND_CONTRACTS.size, 91);
+  assert.equal(HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS.size, 7);
+  assert.equal(classified.size, 98);
+  assert.equal(HOSTED_REMOVED_COMMAND_CONTRACTS.size, 11);
+  for (const command of HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS) {
+    assert.equal(HOSTED_UNSUPPORTED_COMMAND_CONTRACTS.has(command), true, command);
+  }
+  for (const command of HOSTED_REMOVED_COMMAND_CONTRACTS) {
+    assert.equal(HOSTED_UNSUPPORTED_COMMAND_CONTRACTS.has(command), true, command);
+  }
+  if (localCommands) assert.deepEqual([...classified].sort(), localCommands);
 
-  for (const command of localCommands) {
+  for (const command of localCommands || classified) {
     const status = hostedCommandStatus(command);
     assert.equal(
       status.supported || status.reason === "unsupported_command",
@@ -473,7 +487,7 @@ test("bridge executable inventory covers the local parser and rejects removed So
     }
   }
   for (const command of removedSocialCommands) {
-    assert.equal(localCommands.includes(command), false, command);
+    assert.equal(localCommands ? localCommands.includes(command) : classified.has(command), false, command);
     assert.equal(hostedCommandStatus(command).reason, "unsupported_command", command);
     assert.throws(() => assertHostedCommandContract(command), BridgeServerError);
   }
