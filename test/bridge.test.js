@@ -1144,8 +1144,11 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.equal(statuses.some((status) => status.approval_url?.startsWith("https://app.unclog.dev/connect?code=")), true);
   assert.equal(statuses.find((status) => status.stage === "approval_fallback").browser_opened, false);
   const authorizePayload = JSON.parse(calls.find((call) => call.url.endsWith("/v1/bridge/device/authorize")).init.body);
+  const firstCommandPayload = JSON.parse(calls.find((call) => call.url.endsWith("/v1/bridge/commands")).init.body);
   assert.match(authorizePayload.device_code, /^dc_[A-Za-z0-9_-]{43}$/);
   assert.match(authorizePayload.user_code, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
+  assert.equal(firstCommandPayload.project_id, "proj_solo_primary");
+  assert.deepEqual(firstCommandPayload.payload, {});
   assert.equal(calls.some((call) => call.init.headers.authorization?.startsWith("Bearer us_")), true);
   assert.equal(calls.some((call) => "x-unclog-device-session" in call.init.headers), false);
 });

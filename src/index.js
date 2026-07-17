@@ -1651,8 +1651,9 @@ function resolveFetch(fetchImpl) {
 }
 
 async function fetchHostedCommand(activeFetch, activeSession, command, payload) {
-  const projectId = payload.project_id || activeSession.projectId;
-  const requestBody = { command, payload };
+  const { project_id: payloadProjectId, ...workflowPayload } = payload;
+  const projectId = payloadProjectId || activeSession.projectId;
+  const requestBody = { command, payload: workflowPayload };
   if (projectId) {
     requestBody.project_id = String(projectId);
   }

@@ -1,6 +1,6 @@
 {
   "name": "unclog-bridge",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Thin local bridge for hosted Unclog commands.",
   "license": "SEE LICENSE IN LICENSE",
   "private": false,

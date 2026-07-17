@@ -7,7 +7,7 @@ The public source and release provenance for this package live at [apiqsha/unclo
 Start from the exact setup prompt shown in the signed-in Unclog dashboard:
 
 ```sh
-npx --yes unclog-bridge@1.0.1 connect --tool codex --setup-intent <short-lived-intent>
+npx --yes unclog-bridge@1.0.2 connect --tool codex --setup-intent <short-lived-intent>
 ```
 
 Run the prompt from anywhere inside the target Git repository. The CLI resolves the Git root, waits for dashboard approval, stores the resulting revocable session in the operating-system credential store, links that repository, and returns the first hosted instruction. On Unix-like systems only, an unavailable keyring may fall back to a verified `0700` directory and `0600` credential file outside the repository; Windows continues to require Credential Manager.
