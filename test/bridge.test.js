@@ -29,7 +29,10 @@ const {
   logout,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
+  presentHostedResult,
   reconcilePendingLocalArtifactEffects,
+  renderCanonicalHostedCommand,
+  renderHostedGuidance,
   repositoryIdentity,
   writeHostedOutputFile
 } = require("../src/index");
@@ -1008,6 +1011,70 @@ test("adapter prompt is minimal and useless without server auth", async () => {
   );
 });
 
+test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
+  assert.equal(
+    renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
+    "npx --yes unclog-bridge@1.0.5 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
+  );
+  const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.5 drafts list/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.5 goals template --draft/);
+  assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
+  assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
+  assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
+});
+
+test("default customer presentation is compact, executable, and keeps raw diagnostics opt-in", () => {
+  const hosted = hostedOk("drafts.list", {
+    commands_now: ["unclog --json drafts list"],
+    next_action: {
+      code: "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT",
+      command: "unclog --json drafts list",
+      commands_now: ["unclog --json drafts list"]
+    },
+    drafts: [
+      { draft_id: "D-active", status: "intake", editable: true },
+      { draft_id: "D-history", status: "submitted", editable: false }
+    ],
+    domain: { response: { duplicated: true } },
+    source: { kind: "hosted-api" },
+    agent_instruction: {
+      schema: "unclog-agent-instruction/1",
+      instruction_id: "UGI_test",
+      guidance_sha256: "server-hash",
+      guidance_markdown: "Run `unclog --json drafts list`.",
+      transport: { canonical_command_notation_only: true }
+    }
+  });
+  const compact = presentHostedResult(hosted);
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.5 drafts list");
+  assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
+  assert.equal(compact.next_action.command, compact.commands_now[0]);
+  assert.equal(compact.drafts.length, 1);
+  assert.equal(compact.drafts[0].draft_id, "D-active");
+  assert.equal(compact.draft_summary.submitted_history_count, 1);
+  assert.equal(compact.domain, undefined);
+  assert.equal(compact.source, undefined);
+  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.5 drafts list/);
+  assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
+  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.5");
+
+  const raw = presentHostedResult(hosted, { raw: true });
+  assert.equal(raw.commands_now[0], "unclog --json drafts list");
+  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.5 drafts list");
+  assert.equal(raw.drafts.length, 2);
+  assert.deepEqual(raw.domain, { response: { duplicated: true } });
+});
+
+test("raw and debug presentation flags never enter the hosted workflow payload", () => {
+  const parsed = parseHostedCommandArgv(["drafts", "list", "--raw", "--debug"]);
+  assert.equal(parsed.command, "drafts.list");
+  assert.equal(parsed.payload.raw, undefined);
+  assert.equal(parsed.payload.debug, undefined);
+  assert.equal(parsed.payload.metadata, undefined);
+  assert.deepEqual(parsed.payload.cli_argv, ["drafts", "list"]);
+});
+
 test("customer adapters use discoverable Agent Skills paths and safely retire only owned Claude legacy files", () => {
   const homeDir = tempStorage();
   const legacyPath = path.join(homeDir, ".claude", "commands", "unclog-hosted.md");
@@ -1031,7 +1098,7 @@ test("customer adapters use discoverable Agent Skills paths and safely retire on
   assert.equal(codex.path, "~/.agents/skills/unclog-hosted/SKILL.md");
   assert.match(
     fs.readFileSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md"), "utf8"),
-    /follow the server-provided next action/
+    /agent_instruction\.guidance_markdown/
   );
 });
 
@@ -1254,7 +1321,7 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.match(adapterText, /^---\nname: unclog-hosted\ndescription: /);
   assert.match(adapterText, /start, continue, resume, or check Unclog work/);
   assert.match(adapterText, /Do not guess the next workflow command/);
-  assert.match(adapterText, /<!-- unclog-hosted-adapter-v1 -->/);
+  assert.match(adapterText, /<!-- unclog-hosted-adapter-v2 -->/);
   assert.equal(fs.existsSync(path.join(cwd, ".agents", "skills", "unclog-hosted", "SKILL.md")), false);
   assert.equal(statuses[0].stage, "waiting_for_dashboard_approval");
   assert.equal(statuses.some((status) => status.stage === "approval_poll_retry"), true);

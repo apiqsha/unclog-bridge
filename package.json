@@ -1,12 +1,12 @@
 {
   "name": "unclog-bridge",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Thin local bridge for hosted Unclog commands.",
   "license": "SEE LICENSE IN LICENSE",
   "private": false,
   "repository": {
     "type": "git",
-    "url": "https://github.com/apiqsha/unclog-bridge.git"
+    "url": "git+https://github.com/apiqsha/unclog-bridge.git"
   },
   "homepage": "https://unclog.dev",
   "bugs": {

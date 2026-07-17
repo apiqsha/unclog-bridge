@@ -68,6 +68,21 @@ function hostedCommandEnvelope(command, extra = {}) {
     local_contract: { responseKeys: ["status", "next_action", "commands_now"] },
     next_action: { code: "HOSTED_STEP_READY", message: "Continue the hosted mission." },
     commands_now: [],
+    agent_instruction: {
+      schema: "unclog-agent-instruction/1",
+      instruction_id: `UGI_${command.replaceAll(".", "_")}`,
+      phase: command.startsWith("action") || command.startsWith("set") ? "current_action_set" : "intake",
+      authority: "hosted_unclog_server",
+      guidance_sha256: "cold-customer-server-guidance",
+      guidance_markdown: "Follow the server phase. Run `unclog --json next`; never use a private local CLI.",
+      transport: {
+        kind: "official_thin_bridge",
+        private_local_cli_allowed: false,
+        canonical_command_notation_only: true,
+        executable_commands_field: "bridge_commands_now",
+        local_editable_roots: [".unclog-drafts"]
+      }
+    },
     ...extra
   };
 }
@@ -257,7 +272,10 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
             }
           : {};
       const listedDrafts = command === "drafts.list"
-        ? { drafts: [{ draft_id: draftId, status: "intake", file: draftRelative, editable: true }] }
+        ? { drafts: [
+            { draft_id: draftId, status: "intake", file: draftRelative, editable: true },
+            { draft_id: "D20260716-120003-dead00", status: "submitted", file: ".unclog-drafts/history/submitted_goals.json", editable: false }
+          ] }
         : {};
       sendJson(response, 200, hostedCommandEnvelope(command, {
         mission_id: hosted.mission && hosted.mission.id,
@@ -295,12 +313,23 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     );
     assert.equal(connected.status, "connected");
     assert.equal(connected.project.id, "proj_clean");
+    assert.equal(connected.agent_instruction.authority, "hosted_unclog_server");
+    assert.match(connected.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.5 next/);
+    const bootstrapFile = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
+    assert.equal(fs.existsSync(bootstrapFile), true);
+    fs.rmSync(bootstrapFile);
+    assert.equal(fs.existsSync(bootstrapFile), false);
     const createdDraft = await run("goals", "template", "--draft");
+    assert.equal(fs.existsSync(bootstrapFile), true);
+    assert.match(fs.readFileSync(bootstrapFile, "utf8"), /This is a bootstrap only/);
     assert.equal(createdDraft.file, draftRelative);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(customerRepo, draftRelative), "utf8")), draftDocument);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(customerRepo, statusRelative), "utf8")), intakeStatus);
     const listedDrafts = await run("drafts", "list");
+    assert.equal(listedDrafts.drafts.length, 1);
     assert.equal(listedDrafts.drafts[0].draft_id, draftId);
+    assert.equal(listedDrafts.draft_summary.submitted_history_count, 1);
+    assert.equal(listedDrafts.domain, undefined);
     await run("mission", "create", "--title", "Hosted-only mission");
     await run("goals", "lock", "--file", draftRelative, "--mission", "M001");
     assert.equal(fs.existsSync(path.join(customerRepo, draftRelative)), false);
@@ -385,6 +414,12 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     const sessionFile = path.join(homeDir, "bridge", "session.json");
     assert.equal(fs.existsSync(sessionFile), true);
     assert.equal(fs.existsSync(path.join(customerRepo, ".unclog", "state.json")), false);
+    assert.equal(fs.existsSync(path.join(homeDir, ".agents", "skills", "unclog", "SKILL.md")), false);
+    assert.equal(fs.existsSync(path.join(homeDir, ".agents", "skills", "unclog-goal-intake", "SKILL.md")), false);
+    assert.match(
+      fs.readFileSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md"), "utf8"),
+      /This is a bootstrap only/
+    );
     const submittedGoalPayload = hosted.payloads.find((item) => item.command === "goals.lock").payload;
     assert.equal(submittedGoalPayload.workflow_file_path, draftRelative);
     assert.deepEqual(submittedGoalPayload.workflow_document, draftDocument);

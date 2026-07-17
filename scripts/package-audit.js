@@ -18,13 +18,13 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.4") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.5") {
   throw new Error("Public package identity must remain explicit and version pinned.");
 }
 if (manifest.license !== "SEE LICENSE IN LICENSE" || !fs.existsSync(path.join(root, "LICENSE"))) {
   throw new Error("Customer usage terms must be explicit in the packaged LICENSE file.");
 }
-if (manifest.repository?.url !== "https://github.com/apiqsha/unclog-bridge.git") {
+if (manifest.repository?.url !== "git+https://github.com/apiqsha/unclog-bridge.git") {
   throw new Error("Package provenance repository must be the public thin-bridge repository.");
 }
 if (manifest.publishConfig?.access !== "public" || manifest.publishConfig?.provenance !== true) {

@@ -869,6 +869,7 @@ const PAYLOAD_FLAG_ALIASES = {
 };
 
 const BOOLEAN_CLI_FLAGS = new Set([
+  "debug",
   "draft",
   "fresh",
   "include_archived",
@@ -910,6 +911,7 @@ const OUTPUT_WORKFLOW_FILE_COMMANDS = new Set([
 ]);
 
 const TRANSPORT_ONLY_FLAGS = new Set([
+  "debug",
   "json",
   "project",
   "project_id",
@@ -919,6 +921,7 @@ const TRANSPORT_ONLY_FLAGS = new Set([
   "idempotency_key",
   "idem",
   "mission",
+  "raw",
   "review_lifecycle_file"
 ]);
 
@@ -1535,6 +1538,7 @@ function flagsToWorkflowPayload(argv = []) {
   const metadataFlags = {};
   for (const [rawKey, value] of Object.entries(rawFlags)) {
     const normalizedKey = normalizePayloadFlagKey(rawKey);
+    if (normalizedKey === "raw" || normalizedKey === "debug") continue;
     const key = PAYLOAD_FLAG_ALIASES[normalizedKey] || normalizedKey;
     if (!key) {
       continue;
@@ -1742,9 +1746,95 @@ async function postDeviceJson(activeFetch, apiBaseUrl, endpoint, body) {
   return data;
 }
 
+function renderCanonicalHostedCommand(value) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!/^unclog(?:\.exe)?\s+--[a-z0-9-]+(?:\s|$)/i.test(trimmed)) return value;
+  const args = trimmed
+    .replace(/^unclog(?:\.exe)?\s*/i, "")
+    .replace(/(^|\s)--json(?=\s|$)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `npx --yes unclog-bridge@${BRIDGE_VERSION}${args ? ` ${args}` : ""}`;
+}
+
+function renderHostedGuidance(markdown) {
+  if (typeof markdown !== "string") return markdown;
+  return markdown
+    .replace(/`unclog(?:\.exe)?\s+(--[a-z0-9-]+[^`\r\n]*)`/gi, (_match, args) => `\`${renderCanonicalHostedCommand(`unclog ${args}`)}\``)
+    .replace(/(^|\n)([ \t]*)unclog(?:\.exe)?\s+(--[a-z0-9-]+[^\r\n]*)/gi, (_match, lead, indent, args) => (
+      `${lead}${indent}${renderCanonicalHostedCommand(`unclog ${args}`)}`
+    ));
+}
+
+function renderHostedTransport(value, key = "") {
+  if (Array.isArray(value)) return value.map((item) => renderHostedTransport(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, child]) => [childKey, renderHostedTransport(child, childKey)])
+    );
+  }
+  if (typeof value !== "string") return value;
+  if (key === "guidance_markdown") return renderHostedGuidance(value);
+  return renderCanonicalHostedCommand(value);
+}
+
+function compactDraftListing(result) {
+  if (result.command !== "drafts.list" || !Array.isArray(result.drafts)) return result;
+  const allDrafts = result.drafts;
+  const activeDrafts = allDrafts.filter((draft) => (
+    draft && draft.status === "intake" && draft.editable === true
+  ));
+  return {
+    ...result,
+    drafts: activeDrafts,
+    draft_summary: {
+      active_editable_count: activeDrafts.length,
+      submitted_history_count: allDrafts.filter((draft) => draft && draft.status === "submitted").length,
+      total_count: allDrafts.length,
+      default_view: "active_editable_only",
+      history_command: `npx --yes unclog-bridge@${BRIDGE_VERSION} drafts list --raw`
+    }
+  };
+}
+
+function presentHostedResult(result, options = {}) {
+  const raw = options.raw === true;
+  const canonical = JSON.parse(JSON.stringify(result || {}));
+  const bridgeCommands = Array.isArray(canonical.commands_now)
+    ? canonical.commands_now.map(renderCanonicalHostedCommand)
+    : [];
+  if (raw) {
+    return { ...canonical, bridge_commands_now: bridgeCommands };
+  }
+  let rendered = renderHostedTransport(canonical);
+  rendered.bridge_commands_now = bridgeCommands;
+  if (rendered.agent_instruction && typeof rendered.agent_instruction === "object") {
+    const canonicalHash = String(canonical.agent_instruction?.guidance_sha256 || "");
+    const renderedGuidance = String(rendered.agent_instruction.guidance_markdown || "");
+    rendered.agent_instruction = {
+      ...rendered.agent_instruction,
+      canonical_guidance_sha256: canonicalHash,
+      guidance_sha256: crypto.createHash("sha256").update(renderedGuidance).digest("hex"),
+      transport: {
+        ...(rendered.agent_instruction.transport || {}),
+        canonical_command_notation_only: false,
+        executable_commands_field: "commands_now",
+        rendered_by_bridge_version: BRIDGE_VERSION
+      }
+    };
+  }
+  for (const key of ["command_status", "domain", "entitlement", "local_contract", "refresh", "source"]) {
+    delete rendered[key];
+  }
+  rendered = compactDraftListing(rendered);
+  return rendered;
+}
+
 function installHostedAdapter(tool, homeDir = os.homedir()) {
-  const marker = "<!-- unclog-hosted-adapter-v1 -->";
-  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nUse only the published \`unclog-bridge\` thin CLI. Never use a local Unclog development CLI or edit \`.unclog\` state. Goal-intake files under \`.unclog-drafts\` are the only local editable Unclog workflow artifacts.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\` to resume the exact next hosted instruction. Treat hosted JSON fields \`next_action\`, \`commands_now\`, and \`local_draft\` as authoritative. Continue an existing \`local_draft.file\` instead of creating a duplicate. Do not guess the next workflow command. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
+  const marker = "<!-- unclog-hosted-adapter-v2 -->";
+  const ownedMarkers = [marker, "<!-- unclog-hosted-adapter-v1 -->"];
+  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nThis is a bootstrap only. Use the published \`unclog-bridge\` thin CLI; never use or install a private/local Unclog CLI and never edit \`.unclog\`. Only the active intake file under \`.unclog-drafts\` may be edited locally.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\`. Treat \`agent_instruction.guidance_markdown\` as the live phase skill selected by hosted Unclog, and execute only the bridge-rendered \`commands_now\`. Continue an existing \`local_draft.file\` instead of creating a duplicate. The server owns workflow state and the bridge owns transport. Do not guess the next workflow command or reconstruct the workflow locally. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
   const relative = tool === "claude"
     ? path.join(".claude", "skills", "unclog-hosted", "SKILL.md")
     : path.join(".agents", "skills", "unclog-hosted", "SKILL.md");
@@ -1754,7 +1844,7 @@ function installHostedAdapter(tool, homeDir = os.homedir()) {
   const target = path.join(homeDir, relative);
   if (fs.existsSync(target)) {
     const existing = fs.readFileSync(target, "utf8");
-    if (!existing.includes(marker)) {
+    if (!ownedMarkers.some((ownedMarker) => existing.includes(ownedMarker))) {
       throw new BridgeServerError("adapter_path_conflict", `Unclog did not overwrite existing file ${relative}.`, blockedState("adapter_path_conflict"));
     }
   }
@@ -1763,7 +1853,7 @@ function installHostedAdapter(tool, homeDir = os.homedir()) {
   let removedLegacyAdapter = false;
   if (legacyRelative) {
     const legacyTarget = path.join(homeDir, legacyRelative);
-    if (fs.existsSync(legacyTarget) && fs.readFileSync(legacyTarget, "utf8").includes(marker)) {
+    if (fs.existsSync(legacyTarget) && ownedMarkers.some((ownedMarker) => fs.readFileSync(legacyTarget, "utf8").includes(ownedMarker))) {
       fs.rmSync(legacyTarget);
       removedLegacyAdapter = true;
     }
@@ -1964,7 +2054,8 @@ async function connectWithSetupIntent(argv = [], options = {}) {
     }
     saved = saveSession(sessionRecord, sessionToken, sessionOptions);
     const link = await callHostedProjectLink({ projectId: exchange.project_id, session, fetchImpl: activeFetch });
-    const firstInstruction = await callHostedCommand({ command: "next", payload: { project_id: exchange.project_id }, session, fetchImpl: activeFetch });
+    const firstInstructionRaw = await callHostedCommand({ command: "next", payload: { project_id: exchange.project_id }, session, fetchImpl: activeFetch });
+    const firstInstruction = presentHostedResult(firstInstructionRaw);
     return {
       ok: true,
       linked: true,
@@ -1983,6 +2074,7 @@ async function connectWithSetupIntent(argv = [], options = {}) {
       },
       next_action: firstInstruction.next_action,
       commands_now: firstInstruction.commands_now || [],
+      agent_instruction: firstInstruction.agent_instruction,
       hosted_instruction: firstInstruction
     };
   } catch (error) {
@@ -2335,7 +2427,14 @@ async function main(argv = process.argv.slice(2)) {
   if (!command || command === "help" || command === "--help") {
     console.log(JSON.stringify({
       usage: "unclog-bridge connect|follow|status|doctor|logout|revoke|<hosted-command>",
-      connect: `npx --yes unclog-bridge@${BRIDGE_VERSION} connect --tool codex|claude --setup-intent <intent>`
+      connect: `npx --yes unclog-bridge@${BRIDGE_VERSION} connect --tool codex|claude --setup-intent <intent>`,
+      resume: `npx --yes unclog-bridge@${BRIDGE_VERSION} follow`,
+      examples: [
+        `npx --yes unclog-bridge@${BRIDGE_VERSION} drafts list`,
+        `npx --yes unclog-bridge@${BRIDGE_VERSION} goals template --draft`,
+        `npx --yes unclog-bridge@${BRIDGE_VERSION} <hosted command> --raw`
+      ],
+      output: "Default output is a compact cold-agent view with server guidance and executable thin-bridge commands. Add --raw only for complete diagnostics."
     }, null, 2));
     return 0;
   }
@@ -2399,18 +2498,25 @@ async function main(argv = process.argv.slice(2)) {
   }
   try {
     reconcilePendingLocalArtifactEffects();
+    const rawOutput = argv.includes("--raw") || argv.includes("--debug");
     const parsed = command === "follow"
       ? parseHostedCommandArgv(argv.length > 1 ? argv.slice(1) : ["next"])
       : parseHostedCommandArgv(argv);
-    const result = await createBridgeClient().command(parsed.command, parsed.payload);
+    const activeSession = loadSession();
+    const adapterRefresh = activeSession?.tool
+      ? installHostedAdapter(activeSession.tool)
+      : null;
+    const result = await createBridgeClient({ session: activeSession }).command(parsed.command, parsed.payload);
     const localArtifacts = applyHostedLocalArtifactEffects(result);
     const localOutput = parsed.localOutputPath
       ? writeHostedOutputFile(parsed.localOutputPath, result)
       : null;
+    const presented = presentHostedResult(result, { raw: rawOutput });
     console.log(JSON.stringify({
-      ...result,
+      ...presented,
       ...(localOutput ? { local_output: localOutput } : {}),
-      ...(localArtifacts ? { local_artifacts: localArtifacts } : {})
+      ...(localArtifacts ? { local_artifacts: localArtifacts } : {}),
+      ...(adapterRefresh ? { adapter_refresh: adapterRefresh } : {})
     }, null, 2));
     return 0;
   } catch (error) {
@@ -2450,7 +2556,10 @@ module.exports = {
   normalizeHostedCommand,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
+  presentHostedResult,
   reconcilePendingLocalArtifactEffects,
+  renderCanonicalHostedCommand,
+  renderHostedGuidance,
   repositoryIdentity,
   writeHostedOutputFile
 };
