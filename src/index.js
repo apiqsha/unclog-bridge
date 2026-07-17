@@ -2371,6 +2371,9 @@ async function fetchHostedCommand(activeFetch, activeSession, command, payload) 
   const { project_id: payloadProjectId, ...workflowPayload } = payload;
   const projectId = payloadProjectId || activeSession.projectId;
   const requestBody = { command, payload: workflowPayload };
+  if (command === "agents.handoff" && !workflowPayload.idempotency_key) {
+    requestBody.idempotency_key = `handoff-${crypto.randomUUID()}`;
+  }
   if (projectId) {
     requestBody.project_id = String(projectId);
   }

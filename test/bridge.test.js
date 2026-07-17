@@ -321,6 +321,43 @@ test("authenticated command calls hosted server without local authority", async 
   });
 });
 
+test("each worker handoff reissue receives a fresh transport idempotency key", async () => {
+  const bodies = [];
+  const session = {
+    apiBaseUrl: "https://api.unclog.dev",
+    sessionToken: TEST_SESSION_TOKEN,
+    deviceSessionId: "device-session-1",
+    projectId: "proj_solo_primary"
+  };
+  const fetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      async json() {
+        return hostedOk("agents.handoff", {
+          next_action: { code: "WORKER_THREAD_HANDOFF_REQUIRED", commands_now: [] },
+          commands_now: []
+        });
+      }
+    };
+  };
+
+  const payload = {
+    mission_id: "M001",
+    agent_id: "sub-1",
+    cli_argv: ["agents", "handoff", "--agent-id", "sub-1"]
+  };
+  await callHostedCommand({ command: "agents.handoff", payload, session, fetchImpl });
+  await callHostedCommand({ command: "agents.handoff", payload, session, fetchImpl });
+
+  assert.equal(bodies.length, 2);
+  assert.match(bodies[0].idempotency_key, /^handoff-[0-9a-f-]{36}$/);
+  assert.match(bodies[1].idempotency_key, /^handoff-[0-9a-f-]{36}$/);
+  assert.notEqual(bodies[0].idempotency_key, bodies[1].idempotency_key);
+  assert.equal(bodies[0].payload.idempotency_key, undefined);
+  assert.deepEqual(bodies[0].payload, payload);
+});
+
 test("hosted response contracts expose local CLI response gates", () => {
   const actionCheck = hostedResponseContract("action check");
   assert.equal(actionCheck.version, "hosted_local_cli_parity_v1");
@@ -1015,11 +1052,11 @@ test("adapter prompt is minimal and useless without server auth", async () => {
 test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
   assert.equal(
     renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
-    "npx --yes unclog-bridge@1.0.11 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
+    "npx --yes unclog-bridge@1.0.12 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
   );
   const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.11 drafts list/);
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.11 goals template --draft/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.12 drafts list/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.12 goals template --draft/);
   assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
   assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
   assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
@@ -1048,7 +1085,7 @@ test("default customer presentation is compact, executable, and keeps raw diagno
     }
   });
   const compact = presentHostedResult(hosted);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 drafts list");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 drafts list");
   assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
   assert.equal(compact.next_action.command, compact.commands_now[0]);
   assert.equal(compact.drafts.length, 1);
@@ -1056,13 +1093,13 @@ test("default customer presentation is compact, executable, and keeps raw diagno
   assert.equal(compact.draft_summary.submitted_history_count, 1);
   assert.equal(compact.domain, undefined);
   assert.equal(compact.source, undefined);
-  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.11 drafts list/);
+  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.12 drafts list/);
   assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
-  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.11");
+  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.12");
 
   const raw = presentHostedResult(hosted, { raw: true });
   assert.equal(raw.commands_now[0], "unclog --json drafts list");
-  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.11 drafts list");
+  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.12 drafts list");
   assert.equal(raw.drafts.length, 2);
   assert.deepEqual(raw.domain, { response: { duplicated: true } });
 });
@@ -1161,7 +1198,7 @@ test("manager monitoring keeps actionable guidance while duplicate state project
   assert.deepEqual(compact.manager_live_notes, hosted.manager_live_notes);
   assert.equal(compact.agent_instruction.guidance_markdown, undefined);
   assert.match(compact.agent_instruction.guidance_delivery, /omits repeated full phase guidance/);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 --mission M001 agents watch");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 --mission M001 agents watch");
   assert.equal(compact.next, undefined);
   assert.equal(compact.bridge_commands_now, undefined);
 
@@ -1215,11 +1252,11 @@ test("manager watch keeps observed stale recovery while duplicate assignment pro
     reason: "handoff_unconfirmed",
     progress_status: "pending",
     handoff_status: "awaiting_worker_packet",
-    handoff_command: "npx --yes unclog-bridge@1.0.11 --mission M001 agents handoff --agent-id sub-1"
+    handoff_command: "npx --yes unclog-bridge@1.0.12 --mission M001 agents handoff --agent-id sub-1"
   }]);
   assert.equal(compact.next_action.code, "HANDLE_ATTENTION_WORKERS");
   assert.equal(compact.next_action.attention_kind, "handoff_unconfirmed");
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 --mission M001 agents handoff --agent-id sub-1");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 --mission M001 agents handoff --agent-id sub-1");
   assert.equal(compact.agent_assignment, undefined);
   assert.equal(compact.agents, undefined);
   assert.equal(compact.agent_progress, undefined);
@@ -1271,7 +1308,7 @@ test("worker handoff defaults to the exact cold-worker prompt without manager di
     assigned_root_ids: ["G001"],
     manager_reference_media_count: 0,
     packet_command: "unclog --mission M001 --json agents packet --agent-id sub-1 --focus",
-    first_prompt: "Start by running: `npx --yes unclog-bridge@1.0.11 --mission M001 agents packet --agent-id sub-1 --focus`",
+    first_prompt: "Start by running: `npx --yes unclog-bridge@1.0.12 --mission M001 agents packet --agent-id sub-1 --focus`",
     transport: "official_thin_bridge",
     customer_safe: true,
     handoff_required: true,
@@ -1291,7 +1328,7 @@ test("worker handoff defaults to the exact cold-worker prompt without manager di
 
   const compact = presentHostedResult(hosted);
   assert.equal(compact.output_view.mode, "compact_worker_handoff");
-  assert.match(compact.first_prompt, /npx --yes unclog-bridge@1\.0\.11 --mission M001 agents packet --agent-id sub-1 --focus/);
+  assert.match(compact.first_prompt, /npx --yes unclog-bridge@1\.0\.12 --mission M001 agents packet --agent-id sub-1 --focus/);
   assert.equal(compact.billing, undefined);
   assert.equal(compact.contract, undefined);
   assert.equal(compact.device, undefined);
