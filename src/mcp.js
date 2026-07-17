@@ -331,6 +331,31 @@ function assertInput(input, allowedFields, requiredFields = []) {
   return clone(value);
 }
 
+function bindControlledInputToCliArgv(payload, values) {
+  if (!Array.isArray(payload.cli_argv)) return;
+  for (const [field, value] of Object.entries(values)) {
+    if (!["string", "number", "boolean"].includes(typeof value)) {
+      const error = new Error(`unclog_act input field ${field} must be a scalar value.`);
+      error.code = "mcp_action_input_invalid";
+      throw error;
+    }
+    const flag = `--${String(field).replaceAll("_", "-")}`;
+    const argv = [];
+    for (let index = 0; index < payload.cli_argv.length; index += 1) {
+      const token = String(payload.cli_argv[index]);
+      if (token === flag) {
+        if (index + 1 < payload.cli_argv.length && !String(payload.cli_argv[index + 1]).startsWith("--")) index += 1;
+        continue;
+      }
+      if (token.startsWith(`${flag}=`)) continue;
+      argv.push(token);
+    }
+    if (value === true) argv.push(flag);
+    else if (value !== false) argv.push(flag, String(value));
+    payload.cli_argv = argv;
+  }
+}
+
 function mcpError(error) {
   const state = error?.publicState && typeof error.publicState === "object" ? error.publicState : {};
   return {
@@ -461,7 +486,9 @@ function createMcpRuntime(bridge, options = {}) {
         throw error;
       }
       const allowedInput = [...new Set([...(descriptor.required_input || []), ...Object.keys(descriptor.field_guide || {})])];
-      Object.assign(parsed.payload, assertInput(input.input, allowedInput, descriptor.required_input || []));
+      const controlledInput = assertInput(input.input, allowedInput, descriptor.required_input || []);
+      Object.assign(parsed.payload, controlledInput);
+      bindControlledInputToCliArgv(parsed.payload, controlledInput);
       const version = projectVersion(authority.result);
       if (version !== null) parsed.payload.expected_project_version = version;
       const result = await client.command(parsed.command, parsed.payload);

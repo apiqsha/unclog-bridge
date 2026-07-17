@@ -184,6 +184,8 @@ test("confirmed mission-create authority survives a stateless next refresh at th
   assert.equal(mutations.length, 1);
   assert.equal(mutations[0].payload.expected_project_version, 0);
   assert.equal(mutations[0].payload.title, "Disposable queue lab");
+  assert.equal(mutations[0].payload.cli_argv.includes("Disposable queue lab"), true);
+  assert.equal(mutations[0].payload.cli_argv.includes("Compact mission title"), false);
 });
 
 test("unclog_act re-fetches authority, binds mission/action/version, and rejects stale or arbitrary input", async () => {
