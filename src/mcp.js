@@ -150,6 +150,22 @@ function currentCommandEntries(result) {
     && Array.isArray(result?.next_action?.after_user_confirms_goals)
     ? result.next_action.after_user_confirms_goals
     : [];
+  const conditionalActions = [];
+  const nextAction = result?.next_action && typeof result.next_action === "object" ? result.next_action : {};
+  const addConditionalAction = (value) => {
+    if (!value || typeof value !== "object" || typeof value.command !== "string" || !value.command.trim()) return;
+    conditionalActions.push({
+      raw: value.command,
+      auxiliary: true,
+      condition: String(value.condition || "when_current_workflow_condition_is_met"),
+      context: {
+        ...(typeof value.draft_id === "string" ? { draft_id: value.draft_id } : {}),
+        ...(typeof value.file === "string" ? { file: value.file } : {})
+      }
+    });
+  };
+  if (Array.isArray(nextAction.local_draft_actions)) nextAction.local_draft_actions.forEach(addConditionalAction);
+  addConditionalAction(nextAction.create_new_action);
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
     if (Array.isArray(value)) {
@@ -175,8 +191,13 @@ function currentCommandEntries(result) {
     for (const raw of values) {
       if (typeof raw !== "string" || !raw.trim() || seen.has(raw)) continue;
       seen.add(raw);
-      entries.push({ raw, auxiliary, condition });
+      entries.push({ raw, auxiliary, condition, context: {} });
     }
+  }
+  for (const entry of conditionalActions) {
+    if (seen.has(entry.raw)) continue;
+    seen.add(entry.raw);
+    entries.push(entry);
   }
   return entries;
 }
@@ -220,7 +241,7 @@ function actionDescriptors(result, actor, deps) {
     ...(result?.next_action?.field_guide && typeof result.next_action.field_guide === "object" ? result.next_action.field_guide : {})
   };
   const descriptors = [];
-  for (const { raw, auxiliary, condition } of currentCommandEntries(result)) {
+  for (const { raw, auxiliary, condition, context = {} } of currentCommandEntries(result)) {
     const command = commandName(raw, deps.supportedCommands);
     if (BLOCKED_MCP_COMMANDS.has(command)) continue;
     const contract = deps.hostedResponseContract(command);
@@ -239,7 +260,9 @@ function actionDescriptors(result, actor, deps) {
       required_input: inputFields,
       field_guide: Object.fromEntries(inputFields.map((field) => [field, fieldGuide[field] || contract.fieldGuide?.[field] || "Current workflow input."])),
       proof_required: contract.proofRequired === true,
-      ...(condition ? { condition, requires_user_confirmation: true } : {})
+      ...(condition ? { condition } : {}),
+      ...(condition === "after_user_confirms_goals" ? { requires_user_confirmation: true } : {}),
+      ...context
     });
   }
   return descriptors;

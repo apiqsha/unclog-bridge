@@ -242,6 +242,106 @@ test("MCP action applies only controlled draft effects inside the repository", a
   assert.equal(fs.existsSync(path.join(root, ".unclog", "state.json")), false);
 });
 
+test("fresh intake transitions from create to exact local draft actions without a list loop", async () => {
+  const root = repository();
+  const draftId = "D20260718-031500-a11ce0";
+  const file = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  const statusFile = `.unclog-drafts/${draftId}/status.json`;
+  const document = { goals: [], ui_ux_parity_gate: { required: false, reasoning: "Non-visual regression." } };
+  const status = {
+    draft_id: draftId,
+    kind: "goals_intake",
+    status: "intake",
+    mission_id: null,
+    goals_file: "unclog_goals.json",
+    created_at: "2026-07-17T19:15:00Z",
+    updated_at: "2026-07-17T19:15:00Z"
+  };
+  const client = {
+    async command(command, payload) {
+      if (command === "next") {
+        const entries = payload?.local_artifacts?.entries || [];
+        if (!entries.some((entry) => entry.path === statusFile)) {
+          return envelope(command, {
+            mission_id: "",
+            next_action: { code: "GOAL_INTAKE_OR_CREATE_MISSION", message: "Create a local draft." },
+            commands_now: ["unclog --json goals template --draft"]
+          });
+        }
+        return envelope(command, {
+          mission_id: "",
+          next_action: {
+            code: "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT",
+            message: "Edit the exact matching local draft, call unclog_next again, then lint it.",
+            commands_now: [],
+            local_drafts: [{ draft_id: draftId, file, status_file: statusFile, editable: true }],
+            local_draft_actions: [{
+              command: `unclog --json goals lint --file "${file}"`,
+              condition: "after_editing_this_matching_draft",
+              draft_id: draftId,
+              file
+            }],
+            create_new_action: {
+              command: "unclog --json goals template --draft",
+              condition: "only_if_no_local_draft_matches_current_request"
+            }
+          },
+          commands_now: []
+        });
+      }
+      if (command === "goals.template") {
+        const operations = [
+          { op: "write_json", path: statusFile, document: status, sha256: artifactHash(status), before_sha256: null },
+          { op: "write_json", path: file, document, sha256: artifactHash(document), before_sha256: null }
+        ];
+        return envelope(command, {
+          mission_id: "",
+          draft_id: draftId,
+          file,
+          status_file: statusFile,
+          commands_now: [],
+          local_artifact_effects: {
+            schema: "unclog-local-artifact-effects/1",
+            effect_id: artifactHash(operations),
+            operations
+          }
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+
+  const first = await runtime.next();
+  assert.deepEqual(first.allowed_actions.map((row) => row.command), ["goals.template"]);
+  const createActionId = first.allowed_actions[0].action_id;
+  const created = await runtime.act({ action_id: createActionId });
+  assert.equal(created.local_artifacts.applied, 2);
+  assert.equal(created.file, file);
+
+  const resumed = await runtime.next();
+  assert.equal(resumed.next_action.code, "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT");
+  assert.equal(resumed.next_action.local_drafts[0].file, file);
+  assert.deepEqual(resumed.allowed_actions.map((row) => row.command), ["goals.lint", "goals.template"]);
+  assert.deepEqual(resumed.allowed_actions[0], {
+    action_id: resumed.allowed_actions[0].action_id,
+    command: "goals.lint",
+    gate: resumed.allowed_actions[0].gate,
+    required_input: [],
+    field_guide: {},
+    proof_required: resumed.allowed_actions[0].proof_required,
+    condition: "after_editing_this_matching_draft",
+    draft_id: draftId,
+    file
+  });
+  assert.equal(resumed.allowed_actions[1].condition, "only_if_no_local_draft_matches_current_request");
+  assert.equal(JSON.stringify(resumed).includes("unclog --json"), false);
+  assert.equal(JSON.stringify(resumed).includes("drafts.list"), false);
+
+  const stale = await runtime.act({ action_id: createActionId });
+  assert.equal(stale.code, "mcp_action_stale");
+});
+
 test("unclog_wait is bounded and returns only after hosted state changes", async () => {
   const root = repository();
   let clock = 0;
