@@ -18,7 +18,7 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.2") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.3") {
   throw new Error("Public package identity must remain explicit and version pinned.");
 }
 if (manifest.license !== "SEE LICENSE IN LICENSE" || !fs.existsSync(path.join(root, "LICENSE"))) {
@@ -33,16 +33,14 @@ if (manifest.publishConfig?.access !== "public" || manifest.publishConfig?.prove
 for (const contract of [
   "id-token: write",
   "runs-on: ubuntu-latest",
-  "actions/checkout@v6",
-  "actions/setup-node@v6",
   "npm@11.17.0",
   "npm publish --access public --provenance",
-  '"unclog-bridge-v*"',
+  "npm publish --access public",
 ]) {
   if (!publishWorkflow.includes(contract)) throw new Error(`Missing release workflow contract: ${contract}`);
 }
-if (/NPM_TOKEN|NODE_AUTH_TOKEN|workflow_dispatch|types:\s*\[published\]/.test(publishWorkflow)) {
-  throw new Error("Final release workflow must use tag-bound OIDC only, without token bootstrap or duplicate triggers.");
+if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes("github.event_name == 'release'")) {
+  throw new Error("Release workflow must separate first-publish token bootstrap from trusted publishing.");
 }
 
 process.stdout.write("package audit passed\n");

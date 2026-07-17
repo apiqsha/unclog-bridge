@@ -12,6 +12,7 @@ const {
   HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
   MissingAuthError,
+  applyHostedLocalArtifactEffects,
   assertHostedProjectLinkEnvelope,
   assertHostedResponseEnvelope,
   assertHostedCommandContract,
@@ -28,6 +29,7 @@ const {
   logout,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
+  reconcilePendingLocalArtifactEffects,
   repositoryIdentity,
   writeHostedOutputFile
 } = require("../src/index");
@@ -55,6 +57,17 @@ function memoryCredentialStore() {
 
 function tempStorage() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "unclog-bridge-"));
+}
+
+function artifactHash(document) {
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+    }
+    return value;
+  };
+  return require("node:crypto").createHash("sha256").update(JSON.stringify(stable(document))).digest("hex");
 }
 
 function localParserCommands() {
@@ -869,6 +882,106 @@ test("hosted output documents are written only to the requested local file", () 
     }),
     (error) => error instanceof BridgeServerError && error.code === "local_output_session_path_rejected"
   );
+});
+
+test("thin bridge materializes hosted goal drafts and carries local draft context back to canonical commands", () => {
+  const root = tempStorage();
+  fs.mkdirSync(path.join(root, ".git"));
+  const draftId = "D20260717-120000-abcdef";
+  const draftRelative = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  const statusRelative = `.unclog-drafts/${draftId}/status.json`;
+  const draft = { goals: [], worker_lanes: { max_sub_agents: 6 } };
+  const status = {
+    draft_id: draftId,
+    kind: "goals_intake",
+    status: "intake",
+    mission_id: null,
+    goals_file: "unclog_goals.json",
+    submitted_file: null,
+    created_at: "2026-07-17T04:00:00Z",
+    updated_at: "2026-07-17T04:00:00Z"
+  };
+  const createOperations = [
+    { op: "write_json", path: statusRelative, before_sha256: null, sha256: artifactHash(status), document: status },
+    { op: "write_json", path: draftRelative, before_sha256: null, sha256: artifactHash(draft), document: draft }
+  ];
+  const createEffects = {
+    schema: "unclog-local-artifact-effects/1",
+    effect_id: artifactHash(createOperations),
+    operations: createOperations
+  };
+  try {
+    const applied = applyHostedLocalArtifactEffects({ domain: { local_artifact_effects: createEffects } }, { cwd: root });
+    assert.equal(applied.applied, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, draftRelative), "utf8")), draft);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, statusRelative), "utf8")), status);
+
+    const listed = parseHostedCommandArgv(["drafts", "list"], { cwd: root });
+    assert.equal(listed.command, "drafts.list");
+    assert.equal(listed.payload.local_artifacts.schema, "unclog-local-artifacts/1");
+    assert.deepEqual(listed.payload.local_artifacts.entries, [{ path: statusRelative, document: status }]);
+
+    const lock = parseHostedCommandArgv(["goals", "lock", "--file", draftRelative], { cwd: root });
+    assert.equal(lock.command, "goals.lock");
+    assert.equal(lock.payload.workflow_file_path, draftRelative);
+    assert.deepEqual(lock.payload.workflow_document, draft);
+    assert.deepEqual(lock.payload.local_artifacts.entries.map((entry) => entry.path), [draftRelative, statusRelative]);
+    assert.deepEqual(lock.payload.cli_argv, ["goals", "lock", "--file", "workflow.json"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("thin bridge archives an accepted local draft idempotently and keeps recovery journals clean", () => {
+  const root = tempStorage();
+  fs.mkdirSync(path.join(root, ".git"));
+  const draftId = "D20260717-120001-fedcba";
+  const draftRelative = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  const submittedRelative = `.unclog-drafts/${draftId}/submitted_goals.json`;
+  const statusRelative = `.unclog-drafts/${draftId}/status.json`;
+  const draft = { goals: [{ text: "Use hosted Unclog with local workflow artifacts" }] };
+  const intakeStatus = {
+    draft_id: draftId, kind: "goals_intake", status: "intake", mission_id: null,
+    goals_file: "unclog_goals.json", submitted_file: null,
+    created_at: "2026-07-17T04:00:00Z", updated_at: "2026-07-17T04:00:00Z"
+  };
+  const submittedStatus = {
+    ...intakeStatus,
+    status: "submitted",
+    mission_id: "M001",
+    goals_file: null,
+    submitted_file: "submitted_goals.json",
+    submitted_at: "2026-07-17T04:01:00Z",
+    updated_at: "2026-07-17T04:01:00Z"
+  };
+  const operations = [
+    { op: "rename", from: draftRelative, path: submittedRelative, sha256: artifactHash(draft) },
+    {
+      op: "write_json", path: statusRelative, before_sha256: artifactHash(intakeStatus),
+      sha256: artifactHash(submittedStatus), document: submittedStatus
+    }
+  ];
+  const effect = {
+    schema: "unclog-local-artifact-effects/1",
+    effect_id: artifactHash(operations),
+    operations
+  };
+  try {
+    fs.mkdirSync(path.join(root, `.unclog-drafts/${draftId}`), { recursive: true });
+    fs.writeFileSync(path.join(root, draftRelative), `${JSON.stringify(draft, null, 2)}\n`);
+    fs.writeFileSync(path.join(root, statusRelative), `${JSON.stringify(intakeStatus, null, 2)}\n`);
+    const first = applyHostedLocalArtifactEffects({ local_artifact_effects: effect }, { cwd: root });
+    assert.equal(first.applied, 2);
+    assert.equal(fs.existsSync(path.join(root, draftRelative)), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, submittedRelative), "utf8")), draft);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, statusRelative), "utf8")), submittedStatus);
+    assert.equal(applyHostedLocalArtifactEffects({ local_artifact_effects: effect }, { cwd: root }).applied, 0);
+    assert.deepEqual(reconcilePendingLocalArtifactEffects({ cwd: root }), { reconciled: 0 });
+    const journalDirectory = path.join(root, ".unclog-drafts", ".bridge-effects");
+    assert.deepEqual(fs.readdirSync(journalDirectory), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("adapter prompt is minimal and useless without server auth", async () => {

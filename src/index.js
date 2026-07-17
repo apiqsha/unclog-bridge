@@ -25,6 +25,10 @@ const DEVICE_AUTHORIZE_ENDPOINT = "/v1/bridge/device/authorize";
 const DEVICE_TOKEN_ENDPOINT = "/v1/bridge/device/token";
 const BRIDGE_VERSION = require("../package.json").version;
 const MAX_LOCAL_OUTPUT_BYTES = 1024 * 1024;
+const LOCAL_ARTIFACT_SCHEMA = "unclog-local-artifacts/1";
+const LOCAL_ARTIFACT_EFFECTS_SCHEMA = "unclog-local-artifact-effects/1";
+const MAX_LOCAL_ARTIFACT_COUNT = 256;
+const DRAFT_ARTIFACT_PATH = /^\.unclog-drafts\/(D\d{8}-\d{6}-[0-9a-f]{6})\/(unclog_goals|submitted_goals|status)\.json$/;
 
 const NORMAL_HOSTED_COMMAND_CONTRACTS = [
   "mission.list",
@@ -953,6 +957,164 @@ function readWorkflowJson(filePath, label) {
   return value;
 }
 
+function resolveGitRoot(cwd = process.cwd()) {
+  let resolved;
+  try {
+    resolved = fs.realpathSync(cwd);
+  } catch {
+    throw new BridgeServerError(
+      "repository_not_found",
+      "Run the Unclog setup prompt from an existing Git repository.",
+      blockedState("repository_not_found")
+    );
+  }
+  let gitRoot = resolved;
+  while (!fs.existsSync(path.join(gitRoot, ".git"))) {
+    const parent = path.dirname(gitRoot);
+    if (parent === gitRoot) {
+      throw new BridgeServerError(
+        "git_repository_required",
+        "Run the Unclog setup prompt from inside the Git repository you want to connect.",
+        blockedState("git_repository_required")
+      );
+    }
+    gitRoot = parent;
+  }
+  return gitRoot;
+}
+
+function stableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableJsonValue(value[key])]));
+  }
+  return value;
+}
+
+function localArtifactDocumentHash(document) {
+  return crypto.createHash("sha256").update(JSON.stringify(stableJsonValue(document))).digest("hex");
+}
+
+function assertNoSymlinkComponents(root, target) {
+  const relative = path.relative(root, target);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new BridgeServerError(
+      "local_artifact_path_rejected",
+      "Hosted Unclog local artifacts must stay inside this repository.",
+      blockedState("local_artifact_path_rejected")
+    );
+  }
+  let current = root;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    if (!fs.existsSync(current)) continue;
+    const stats = fs.lstatSync(current);
+    if (stats.isSymbolicLink()) {
+      throw new BridgeServerError(
+        "local_artifact_symlink_rejected",
+        "Hosted Unclog local artifacts cannot pass through symbolic links.",
+        blockedState("local_artifact_symlink_rejected")
+      );
+    }
+  }
+}
+
+function resolveDraftArtifactPath(rawPath, options = {}) {
+  const cwd = options.cwd || process.cwd();
+  const root = options.root || resolveGitRoot(cwd);
+  const target = path.resolve(cwd, String(rawPath || ""));
+  const relative = path.relative(root, target).split(path.sep).join("/");
+  const match = DRAFT_ARTIFACT_PATH.exec(relative);
+  if (!match) {
+    throw new BridgeServerError(
+      "local_artifact_path_rejected",
+      "Draft artifacts must use .unclog-drafts/<draft-id>/<known-file>.json inside this repository.",
+      blockedState("local_artifact_path_rejected")
+    );
+  }
+  assertNoSymlinkComponents(root, target);
+  return { root, target, relative, draftId: match[1], name: `${match[2]}.json` };
+}
+
+function maybeResolveDraftArtifactPath(rawPath, options = {}) {
+  const cwd = options.cwd || process.cwd();
+  const root = options.root || resolveGitRoot(cwd);
+  const target = path.resolve(cwd, String(rawPath || ""));
+  const relative = path.relative(root, target).split(path.sep).join("/");
+  if (!relative.startsWith(".unclog-drafts/")) return null;
+  return resolveDraftArtifactPath(rawPath, { ...options, root });
+}
+
+function localArtifactEntry(relativePath, document) {
+  const serialized = JSON.stringify(document);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_LOCAL_OUTPUT_BYTES) {
+    throw new BridgeServerError(
+      "local_artifact_too_large",
+      "An Unclog workflow artifact exceeds the 1 MB transport limit.",
+      blockedState("local_artifact_too_large")
+    );
+  }
+  return { path: relativePath, document };
+}
+
+function localArtifactBundle(entries) {
+  if (entries.length > MAX_LOCAL_ARTIFACT_COUNT) {
+    throw new BridgeServerError(
+      "local_artifact_count_invalid",
+      "This repository contains too many active Unclog draft artifacts.",
+      blockedState("local_artifact_count_invalid")
+    );
+  }
+  const totalBytes = entries.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry.document), "utf8"), 0);
+  if (totalBytes > MAX_LOCAL_OUTPUT_BYTES) {
+    throw new BridgeServerError(
+      "local_artifacts_too_large",
+      "Active Unclog draft metadata exceeds the 1 MB transport limit.",
+      blockedState("local_artifacts_too_large")
+    );
+  }
+  return { schema: LOCAL_ARTIFACT_SCHEMA, entries };
+}
+
+function collectDraftStatusArtifacts(options = {}) {
+  const root = options.root || resolveGitRoot(options.cwd || process.cwd());
+  const base = path.join(root, ".unclog-drafts");
+  if (!fs.existsSync(base)) return localArtifactBundle([]);
+  assertNoSymlinkComponents(root, base);
+  const entries = [];
+  for (const item of fs.readdirSync(base, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!item.isDirectory() || !/^D\d{8}-\d{6}-[0-9a-f]{6}$/.test(item.name)) continue;
+    const draftDir = path.join(base, item.name);
+    assertNoSymlinkComponents(root, draftDir);
+    const statusPath = path.join(draftDir, "status.json");
+    if (!fs.existsSync(statusPath)) continue;
+    const resolved = resolveDraftArtifactPath(statusPath, { root, cwd: root });
+    entries.push(localArtifactEntry(resolved.relative, readWorkflowJson(resolved.target, "draft status")));
+  }
+  return localArtifactBundle(entries);
+}
+
+function attachDraftWorkflowContext(payload, filePath, workflowDocument, options = {}) {
+  const root = resolveGitRoot(options.cwd || process.cwd());
+  const draft = maybeResolveDraftArtifactPath(filePath, { ...options, root });
+  if (!draft) return;
+  if (draft.name !== "unclog_goals.json") {
+    throw new BridgeServerError(
+      "local_artifact_path_rejected",
+      "Only an editable unclog_goals.json draft may be submitted as active goal intake.",
+      blockedState("local_artifact_path_rejected")
+    );
+  }
+  const entries = [localArtifactEntry(draft.relative, workflowDocument)];
+  const statusPath = path.join(path.dirname(draft.target), "status.json");
+  if (fs.existsSync(statusPath)) {
+    const status = resolveDraftArtifactPath(statusPath, { root, cwd: root });
+    entries.push(localArtifactEntry(status.relative, readWorkflowJson(status.target, "draft status")));
+  }
+  payload.local_artifacts = localArtifactBundle(entries);
+  payload.workflow_file_path = draft.relative;
+}
+
 function canonicalCliArgv(command, positionals, flagTokens) {
   const argv = [...command.split("."), ...positionals.map(String)];
   for (let index = 0; index < flagTokens.length; index += 1) {
@@ -981,13 +1143,15 @@ function canonicalCliArgv(command, positionals, flagTokens) {
   return argv;
 }
 
-function attachWorkflowDocuments(command, payload, flagTokens) {
+function attachWorkflowDocuments(command, payload, flagTokens, options = {}) {
   const flags = parseFlagArgs(flagTokens);
   const filePath = flags.file;
   let localOutputPath;
   if (filePath && INPUT_WORKFLOW_FILE_COMMANDS.has(command)) {
-    payload.workflow_document = readWorkflowJson(filePath, "--file");
+    const localInputPath = path.resolve(options.cwd || process.cwd(), String(filePath));
+    payload.workflow_document = readWorkflowJson(localInputPath, "--file");
     payload.file = "workflow.json";
+    attachDraftWorkflowContext(payload, localInputPath, payload.workflow_document, options);
   } else if (filePath && OUTPUT_WORKFLOW_FILE_COMMANDS.has(command)) {
     payload.output_file_name = path.basename(String(filePath));
     localOutputPath = String(filePath);
@@ -1117,6 +1281,254 @@ function writeHostedOutputFile(localOutputPath, result, options = {}) {
   };
 }
 
+function extractLocalArtifactEffects(result) {
+  if (!result || typeof result !== "object") return null;
+  return result.local_artifact_effects || (result.domain && result.domain.local_artifact_effects) || null;
+}
+
+function readLocalArtifactDocument(target, label = "local artifact") {
+  if (!fs.existsSync(target)) return null;
+  if (fs.lstatSync(target).isSymbolicLink()) {
+    throw new BridgeServerError(
+      "local_artifact_symlink_rejected",
+      `${label} cannot be read through a symbolic link.`,
+      blockedState("local_artifact_symlink_rejected")
+    );
+  }
+  return readWorkflowJson(target, label);
+}
+
+function validateLocalArtifactEffects(effects, options = {}) {
+  if (!effects || typeof effects !== "object" || Array.isArray(effects)) {
+    throw new BridgeServerError(
+      "local_artifact_effects_invalid",
+      "Hosted Unclog returned an invalid local artifact effect envelope.",
+      blockedState("local_artifact_effects_invalid")
+    );
+  }
+  if (effects.schema !== LOCAL_ARTIFACT_EFFECTS_SCHEMA || !/^[0-9a-f]{64}$/.test(String(effects.effect_id || ""))) {
+    throw new BridgeServerError(
+      "local_artifact_effects_invalid",
+      "Hosted Unclog returned an unsupported local artifact effect contract.",
+      blockedState("local_artifact_effects_invalid")
+    );
+  }
+  if (!Array.isArray(effects.operations) || effects.operations.length > MAX_LOCAL_ARTIFACT_COUNT) {
+    throw new BridgeServerError(
+      "local_artifact_effects_invalid",
+      "Hosted Unclog returned too many local artifact operations.",
+      blockedState("local_artifact_effects_invalid")
+    );
+  }
+  if (localArtifactDocumentHash(effects.operations) !== effects.effect_id) {
+    throw new BridgeServerError(
+      "local_artifact_effects_checksum_mismatch",
+      "Hosted Unclog local artifact operations did not match their signed effect identity.",
+      blockedState("local_artifact_effects_checksum_mismatch")
+    );
+  }
+  const root = options.root || resolveGitRoot(options.cwd || process.cwd());
+  const operations = effects.operations.map((raw) => {
+    if (!raw || typeof raw !== "object" || !["write_json", "rename", "delete"].includes(raw.op)) {
+      throw new BridgeServerError(
+        "local_artifact_effects_invalid",
+        "Hosted Unclog returned an unknown local artifact operation.",
+        blockedState("local_artifact_effects_invalid")
+      );
+    }
+    const destination = resolveDraftArtifactPath(raw.path, { root, cwd: root });
+    if (!/^[0-9a-f]{64}$/.test(String(raw.sha256 || ""))) {
+      throw new BridgeServerError(
+        "local_artifact_effects_invalid",
+        "Hosted Unclog returned an invalid local artifact checksum.",
+        blockedState("local_artifact_effects_invalid")
+      );
+    }
+    if (raw.op === "write_json") {
+      if (!raw.document || typeof raw.document !== "object" || Array.isArray(raw.document)) {
+        throw new BridgeServerError(
+          "local_artifact_effects_invalid",
+          "Hosted Unclog returned an invalid local JSON document.",
+          blockedState("local_artifact_effects_invalid")
+        );
+      }
+      if (localArtifactDocumentHash(raw.document) !== raw.sha256) {
+        throw new BridgeServerError(
+          "local_artifact_checksum_mismatch",
+          "Hosted Unclog local artifact content did not match its checksum.",
+          blockedState("local_artifact_checksum_mismatch")
+        );
+      }
+      if (raw.before_sha256 !== null && raw.before_sha256 !== undefined && !/^[0-9a-f]{64}$/.test(String(raw.before_sha256))) {
+        throw new BridgeServerError(
+          "local_artifact_effects_invalid",
+          "Hosted Unclog returned an invalid local artifact precondition.",
+          blockedState("local_artifact_effects_invalid")
+        );
+      }
+      return { ...raw, destination };
+    }
+    if (raw.op === "rename") {
+      const source = resolveDraftArtifactPath(raw.from, { root, cwd: root });
+      if (path.dirname(source.target) !== path.dirname(destination.target)) {
+        throw new BridgeServerError(
+          "local_artifact_path_rejected",
+          "A draft artifact rename cannot cross draft directories.",
+          blockedState("local_artifact_path_rejected")
+        );
+      }
+      return { ...raw, source, destination };
+    }
+    return { ...raw, destination };
+  });
+  return { root, effectId: effects.effect_id, operations, envelope: effects };
+}
+
+function atomicWriteLocalJson(target, document) {
+  const serialized = `${JSON.stringify(document, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > MAX_LOCAL_OUTPUT_BYTES) {
+    throw new BridgeServerError(
+      "local_artifact_too_large",
+      "Hosted Unclog local artifact exceeds the 1 MB limit.",
+      blockedState("local_artifact_too_large")
+    );
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
+  try {
+    fs.writeFileSync(temporary, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    if (fs.existsSync(target)) fs.rmSync(target);
+    fs.renameSync(temporary, target);
+    try { fs.chmodSync(target, 0o600); } catch { /* Windows ACLs remain authoritative. */ }
+  } finally {
+    if (fs.existsSync(temporary)) fs.rmSync(temporary);
+  }
+}
+
+function applyValidatedLocalArtifactEffects(validated) {
+  let applied = 0;
+  for (const operation of validated.operations) {
+    if (operation.op === "write_json") {
+      const current = readLocalArtifactDocument(operation.destination.target);
+      const currentHash = current ? localArtifactDocumentHash(current) : null;
+      if (currentHash === operation.sha256) continue;
+      const expectedBefore = operation.before_sha256 === undefined ? null : operation.before_sha256;
+      if (currentHash !== null && (expectedBefore === null || currentHash !== expectedBefore)) {
+        throw new BridgeServerError(
+          "local_artifact_conflict",
+          `Unclog did not overwrite a locally changed draft artifact: ${operation.destination.relative}`,
+          blockedState("local_artifact_conflict")
+        );
+      }
+      atomicWriteLocalJson(operation.destination.target, operation.document);
+      applied += 1;
+      continue;
+    }
+    if (operation.op === "rename") {
+      const sourceDocument = readLocalArtifactDocument(operation.source.target);
+      const destinationDocument = readLocalArtifactDocument(operation.destination.target);
+      const sourceHash = sourceDocument ? localArtifactDocumentHash(sourceDocument) : null;
+      const destinationHash = destinationDocument ? localArtifactDocumentHash(destinationDocument) : null;
+      if (destinationHash === operation.sha256) {
+        if (sourceHash !== null && sourceHash !== operation.sha256) {
+          throw new BridgeServerError(
+            "local_artifact_conflict",
+            `Unclog did not remove a locally changed draft artifact: ${operation.source.relative}`,
+            blockedState("local_artifact_conflict")
+          );
+        }
+        if (sourceHash === operation.sha256) fs.rmSync(operation.source.target);
+        continue;
+      }
+      if (destinationHash !== null || sourceHash !== operation.sha256) {
+        throw new BridgeServerError(
+          "local_artifact_conflict",
+          `Unclog could not safely archive draft artifact: ${operation.source.relative}`,
+          blockedState("local_artifact_conflict")
+        );
+      }
+      fs.mkdirSync(path.dirname(operation.destination.target), { recursive: true });
+      fs.renameSync(operation.source.target, operation.destination.target);
+      applied += 1;
+      continue;
+    }
+    const current = readLocalArtifactDocument(operation.destination.target);
+    if (!current) continue;
+    if (localArtifactDocumentHash(current) !== operation.sha256) {
+      throw new BridgeServerError(
+        "local_artifact_conflict",
+        `Unclog did not delete a locally changed draft artifact: ${operation.destination.relative}`,
+        blockedState("local_artifact_conflict")
+      );
+    }
+    fs.rmSync(operation.destination.target);
+    applied += 1;
+  }
+  return applied;
+}
+
+function localArtifactJournalDirectory(root) {
+  return path.join(root, ".unclog-drafts", ".bridge-effects");
+}
+
+function persistLocalArtifactEffect(validated) {
+  const journalDirectory = localArtifactJournalDirectory(validated.root);
+  assertNoSymlinkComponents(validated.root, journalDirectory);
+  fs.mkdirSync(journalDirectory, { recursive: true });
+  const journalPath = path.join(journalDirectory, `${validated.effectId}.json`);
+  if (fs.existsSync(journalPath)) {
+    const existing = readWorkflowJson(journalPath, "local artifact recovery journal");
+    if (JSON.stringify(stableJsonValue(existing)) !== JSON.stringify(stableJsonValue(validated.envelope))) {
+      throw new BridgeServerError(
+        "local_artifact_journal_conflict",
+        "A local Unclog artifact recovery record has conflicting content.",
+        blockedState("local_artifact_journal_conflict")
+      );
+    }
+  } else {
+    atomicWriteLocalJson(journalPath, validated.envelope);
+  }
+  return journalPath;
+}
+
+function applyHostedLocalArtifactEffects(result, options = {}) {
+  const effects = extractLocalArtifactEffects(result);
+  if (!effects) return null;
+  const validated = validateLocalArtifactEffects(effects, options);
+  if (validated.operations.length === 0) {
+    return { effect_id: validated.effectId, applied: 0, reconciled: true };
+  }
+  const journalPath = persistLocalArtifactEffect(validated);
+  const applied = applyValidatedLocalArtifactEffects(validated);
+  if (fs.existsSync(journalPath)) fs.rmSync(journalPath);
+  return { effect_id: validated.effectId, applied, reconciled: true };
+}
+
+function reconcilePendingLocalArtifactEffects(options = {}) {
+  const root = options.root || resolveGitRoot(options.cwd || process.cwd());
+  const journalDirectory = localArtifactJournalDirectory(root);
+  if (!fs.existsSync(journalDirectory)) return { reconciled: 0 };
+  assertNoSymlinkComponents(root, journalDirectory);
+  let reconciled = 0;
+  for (const item of fs.readdirSync(journalDirectory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!item.isFile() || !/^[0-9a-f]{64}\.json$/.test(item.name)) continue;
+    const journalPath = path.join(journalDirectory, item.name);
+    if (fs.lstatSync(journalPath).isSymbolicLink()) {
+      throw new BridgeServerError(
+        "local_artifact_symlink_rejected",
+        "A local Unclog artifact recovery record cannot be a symbolic link.",
+        blockedState("local_artifact_symlink_rejected")
+      );
+    }
+    const effects = readWorkflowJson(journalPath, "local artifact recovery journal");
+    const validated = validateLocalArtifactEffects(effects, { ...options, root });
+    applyValidatedLocalArtifactEffects(validated);
+    fs.rmSync(journalPath);
+    reconciled += 1;
+  }
+  return { reconciled };
+}
+
 function flagsToWorkflowPayload(argv = []) {
   const rawFlags = parseFlagArgs(argv);
   const payload = {};
@@ -1204,7 +1616,7 @@ function splitCommandAndFlagTokens(argv = []) {
   return { commandTokens, flagTokens };
 }
 
-function parseHostedCommandArgv(argv = []) {
+function parseHostedCommandArgv(argv = [], options = {}) {
   const { commandTokens, flagTokens } = splitCommandAndFlagTokens(argv);
 
   for (let length = commandTokens.length; length >= 1; length -= 1) {
@@ -1213,7 +1625,10 @@ function parseHostedCommandArgv(argv = []) {
     if (status.supported || status.reason === "unsupported_command") {
       const positionals = commandTokens.slice(length);
       const payload = attachPositionals(status.command, flagsToWorkflowPayload(flagTokens), positionals);
-      const localOutputPath = attachWorkflowDocuments(status.command, payload, flagTokens);
+      const localOutputPath = attachWorkflowDocuments(status.command, payload, flagTokens, options);
+      if (status.command === "drafts.list") {
+        payload.local_artifacts = collectDraftStatusArtifacts(options);
+      }
       attachReviewLifecycle(status.command, payload, flagTokens);
       payload.cli_argv = canonicalCliArgv(status.command, positionals, flagTokens);
       return {
@@ -1241,28 +1656,7 @@ function sessionOptionsFor(apiBaseUrl, options = {}) {
 }
 
 function repositoryIdentity(cwd = process.cwd()) {
-  let resolved;
-  try {
-    resolved = fs.realpathSync(cwd);
-  } catch {
-    throw new BridgeServerError(
-      "repository_not_found",
-      "Run the Unclog setup prompt from an existing Git repository.",
-      blockedState("repository_not_found")
-    );
-  }
-  let gitRoot = resolved;
-  while (!fs.existsSync(path.join(gitRoot, ".git"))) {
-    const parent = path.dirname(gitRoot);
-    if (parent === gitRoot) {
-      throw new BridgeServerError(
-        "git_repository_required",
-        "Run the Unclog setup prompt from inside the Git repository you want to connect.",
-        blockedState("git_repository_required")
-      );
-    }
-    gitRoot = parent;
-  }
+  const gitRoot = resolveGitRoot(cwd);
   return {
     label: path.basename(gitRoot) || "Repository",
     fingerprint: crypto.createHash("sha256").update(gitRoot).digest("hex")
@@ -2004,14 +2398,20 @@ async function main(argv = process.argv.slice(2)) {
     }
   }
   try {
+    reconcilePendingLocalArtifactEffects();
     const parsed = command === "follow"
       ? parseHostedCommandArgv(argv.length > 1 ? argv.slice(1) : ["next"])
       : parseHostedCommandArgv(argv);
     const result = await createBridgeClient().command(parsed.command, parsed.payload);
+    const localArtifacts = applyHostedLocalArtifactEffects(result);
     const localOutput = parsed.localOutputPath
       ? writeHostedOutputFile(parsed.localOutputPath, result)
       : null;
-    console.log(JSON.stringify(localOutput ? { ...result, local_output: localOutput } : result, null, 2));
+    console.log(JSON.stringify({
+      ...result,
+      ...(localOutput ? { local_output: localOutput } : {}),
+      ...(localArtifacts ? { local_artifacts: localArtifacts } : {})
+    }, null, 2));
     return 0;
   } catch (error) {
     const publicState = error.publicState || blockedState("error");
@@ -2031,6 +2431,7 @@ module.exports = {
   HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
   MissingAuthError,
+  applyHostedLocalArtifactEffects,
   assertHostedCommandContract,
   assertHostedProjectLinkEnvelope,
   assertHostedResponseEnvelope,
@@ -2049,6 +2450,7 @@ module.exports = {
   normalizeHostedCommand,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
+  reconcilePendingLocalArtifactEffects,
   repositoryIdentity,
   writeHostedOutputFile
 };

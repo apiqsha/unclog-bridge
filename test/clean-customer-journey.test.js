@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const { spawn, spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
@@ -71,6 +72,17 @@ function hostedCommandEnvelope(command, extra = {}) {
   };
 }
 
+function artifactHash(document) {
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+    }
+    return value;
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(stable(document))).digest("hex");
+}
+
 function recursiveFiles(root) {
   return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(root, entry.name);
@@ -120,6 +132,31 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     payloads: [],
     sessionToken: null
   };
+  const draftId = "D20260717-120003-c0ffee";
+  const draftRelative = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  const statusRelative = `.unclog-drafts/${draftId}/status.json`;
+  const submittedRelative = `.unclog-drafts/${draftId}/submitted_goals.json`;
+  const draftDocument = { goals: [], worker_lanes: { max_sub_agents: 6 } };
+  const intakeStatus = {
+    draft_id: draftId, kind: "goals_intake", status: "intake", mission_id: null,
+    goals_file: "unclog_goals.json", submitted_file: null,
+    created_at: "2026-07-17T04:00:00Z", updated_at: "2026-07-17T04:00:00Z"
+  };
+  const submittedStatus = {
+    ...intakeStatus, status: "submitted", mission_id: "M001", goals_file: null,
+    submitted_file: "submitted_goals.json", submitted_at: "2026-07-17T04:01:00Z", updated_at: "2026-07-17T04:01:00Z"
+  };
+  const draftCreateOperations = [
+    { op: "write_json", path: statusRelative, before_sha256: null, sha256: artifactHash(intakeStatus), document: intakeStatus },
+    { op: "write_json", path: draftRelative, before_sha256: null, sha256: artifactHash(draftDocument), document: draftDocument }
+  ];
+  const draftSubmitOperations = [
+    { op: "rename", from: draftRelative, path: submittedRelative, sha256: artifactHash(draftDocument) },
+    {
+      op: "write_json", path: statusRelative, before_sha256: artifactHash(intakeStatus),
+      sha256: artifactHash(submittedStatus), document: submittedStatus
+    }
+  ];
   const server = http.createServer(async (request, response) => {
     try {
       const body = await readJsonRequest(request);
@@ -195,13 +232,39 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
       if (command === "action.check") hosted.actionAccepted = true;
       if (command === "set.submit") hosted.setSubmitted = true;
       if (command === "mission.validate") hosted.mission.status = "validated_done";
-      const generated = command === "goals.template"
+      const creatingDraft = command === "goals.template" && body.payload.cli_argv.includes("--draft");
+      const generated = command === "goals.template" && !creatingDraft
         ? { generated_file: { name: "ignored-server-name.json", content: { mission_id: "M001", goals: [] } } }
+        : {};
+      const localArtifactEffects = creatingDraft
+        ? {
+            local_artifact_effects: {
+              schema: "unclog-local-artifact-effects/1",
+              effect_id: artifactHash(draftCreateOperations),
+              operations: draftCreateOperations
+            },
+            draft_id: draftId,
+            file: draftRelative,
+            status_file: statusRelative
+          }
+        : command === "goals.lock"
+          ? {
+              local_artifact_effects: {
+                schema: "unclog-local-artifact-effects/1",
+                effect_id: artifactHash(draftSubmitOperations),
+                operations: draftSubmitOperations
+              }
+            }
+          : {};
+      const listedDrafts = command === "drafts.list"
+        ? { drafts: [{ draft_id: draftId, status: "intake", file: draftRelative, editable: true }] }
         : {};
       sendJson(response, 200, hostedCommandEnvelope(command, {
         mission_id: hosted.mission && hosted.mission.id,
         mission: hosted.mission,
-        ...generated
+        ...generated,
+        ...localArtifactEffects,
+        ...listedDrafts
       }));
     } catch (error) {
       sendJson(response, 500, { allowed: false, code: "test_server_error", message: error.message });
@@ -232,8 +295,17 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     );
     assert.equal(connected.status, "connected");
     assert.equal(connected.project.id, "proj_clean");
+    const createdDraft = await run("goals", "template", "--draft");
+    assert.equal(createdDraft.file, draftRelative);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(customerRepo, draftRelative), "utf8")), draftDocument);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(customerRepo, statusRelative), "utf8")), intakeStatus);
+    const listedDrafts = await run("drafts", "list");
+    assert.equal(listedDrafts.drafts[0].draft_id, draftId);
     await run("mission", "create", "--title", "Hosted-only mission");
-    await run("goals", "lock", "--mission", "M001");
+    await run("goals", "lock", "--file", draftRelative, "--mission", "M001");
+    assert.equal(fs.existsSync(path.join(customerRepo, draftRelative)), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(customerRepo, submittedRelative), "utf8")), draftDocument);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(customerRepo, statusRelative), "utf8")).status, "submitted");
 
     const planFile = path.join(customerRepo, "plan.json");
     const proofFile = path.join(customerRepo, "proof.json");
@@ -313,6 +385,9 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     const sessionFile = path.join(homeDir, "bridge", "session.json");
     assert.equal(fs.existsSync(sessionFile), true);
     assert.equal(fs.existsSync(path.join(customerRepo, ".unclog", "state.json")), false);
+    const submittedGoalPayload = hosted.payloads.find((item) => item.command === "goals.lock").payload;
+    assert.equal(submittedGoalPayload.workflow_file_path, draftRelative);
+    assert.deepEqual(submittedGoalPayload.workflow_document, draftDocument);
     const installedPackage = path.dirname(path.dirname(cli));
     const installedSource = recursiveFiles(installedPackage)
       .filter((file) => /\.(js|json)$/i.test(file))
