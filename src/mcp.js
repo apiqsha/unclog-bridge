@@ -16,6 +16,8 @@ const MCP_INSTRUCTIONS = [
 
 const STRIPPED_COMMAND_KEYS = new Set([
   "after_handoff_command",
+  "after_mission_create",
+  "after_user_confirms_goals",
   "block_command",
   "blocked_command",
   "bridge_commands_now",
@@ -26,6 +28,7 @@ const STRIPPED_COMMAND_KEYS = new Set([
   "commands_now",
   "focus_packet_command",
   "full_packet_command",
+  "if_needed",
   "manager_status_command",
   "next_packet_command",
   "normal_unclog_flow",
@@ -143,6 +146,10 @@ function currentCommandEntries(result) {
   const top = Array.isArray(result?.commands_now) ? result.commands_now : [];
   const nested = Array.isArray(result?.next_action?.commands_now) ? result.next_action.commands_now : [];
   const blockerActions = [];
+  const confirmationActions = result?.next_action?.code === "GOAL_INTAKE_CONFIRM_DRAFT"
+    && Array.isArray(result?.next_action?.after_user_confirms_goals)
+    ? result.next_action.after_user_confirms_goals
+    : [];
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
     if (Array.isArray(value)) {
@@ -160,11 +167,15 @@ function currentCommandEntries(result) {
   visit(result);
   const entries = [];
   const seen = new Set();
-  for (const [values, auxiliary] of [[[...top, ...nested], false], [blockerActions, true]]) {
+  for (const [values, auxiliary, condition] of [
+    [[...top, ...nested], false, null],
+    [blockerActions, true, null],
+    [confirmationActions, true, "after_user_confirms_goals"]
+  ]) {
     for (const raw of values) {
       if (typeof raw !== "string" || !raw.trim() || seen.has(raw)) continue;
       seen.add(raw);
-      entries.push({ raw, auxiliary });
+      entries.push({ raw, auxiliary, condition });
     }
   }
   return entries;
@@ -209,7 +220,7 @@ function actionDescriptors(result, actor, deps) {
     ...(result?.next_action?.field_guide && typeof result.next_action.field_guide === "object" ? result.next_action.field_guide : {})
   };
   const descriptors = [];
-  for (const { raw, auxiliary } of currentCommandEntries(result)) {
+  for (const { raw, auxiliary, condition } of currentCommandEntries(result)) {
     const command = commandName(raw, deps.supportedCommands);
     if (BLOCKED_MCP_COMMANDS.has(command)) continue;
     const contract = deps.hostedResponseContract(command);
@@ -227,7 +238,8 @@ function actionDescriptors(result, actor, deps) {
       gate: contract.gate,
       required_input: inputFields,
       field_guide: Object.fromEntries(inputFields.map((field) => [field, fieldGuide[field] || contract.fieldGuide?.[field] || "Current workflow input."])),
-      proof_required: contract.proofRequired === true
+      proof_required: contract.proofRequired === true,
+      ...(condition ? { condition, requires_user_confirmation: true } : {})
     });
   }
   return descriptors;

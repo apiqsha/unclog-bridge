@@ -69,7 +69,7 @@ function fakeMcpInstall(options = {}) {
     persistent: true,
     serverName: "unclog",
     client: options.client,
-    packageVersion: "1.1.1",
+    packageVersion: "1.1.2",
     runtimeReused: false,
     configPath: path.join(options.homeDir, ".codex", "config.toml"),
     workspaceRoot: options.workspaceRoot,

@@ -83,6 +83,49 @@ test("unclog_next exposes structured current actions without npx or shell comman
   assert.equal(result.transport.shell_commands_allowed, false);
 });
 
+test("confirmed local intake exposes a typed mission-create action without leaking commands", async () => {
+  const root = repository();
+  const calls = [];
+  const confirmEnvelope = () => envelope("next", {
+    next_action: {
+      code: "GOAL_INTAKE_CONFIRM_DRAFT",
+      message: "Ask the user to confirm the captured outcomes before creating the mission.",
+      commands_now: [],
+      after_user_confirms_goals: ['unclog --json mission create --title "Compact mission title"'],
+      after_mission_create: "Continue with the hosted Inbox gate."
+    },
+    commands_now: []
+  });
+  const runtime = createMcpRuntime(bridge, {
+    workspaceRoot: root,
+    client: {
+      async command(command, payload) {
+        calls.push({ command, payload });
+        if (command === "next") return confirmEnvelope();
+        return envelope(command, { project: { id: "project-1", projectVersion: 2 }, commands_now: [] });
+      }
+    }
+  });
+
+  const view = await runtime.next();
+  assert.equal(view.allowed_actions.length, 1);
+  assert.equal(view.allowed_actions[0].command, "mission.create");
+  assert.equal(view.allowed_actions[0].condition, "after_user_confirms_goals");
+  assert.equal(view.allowed_actions[0].requires_user_confirmation, true);
+  assert.deepEqual(view.allowed_actions[0].required_input, ["title"]);
+  assert.equal(view.next_action.after_user_confirms_goals, undefined);
+  assert.equal(view.next_action.after_mission_create, undefined);
+  assert.equal(JSON.stringify(view).includes("unclog --json"), false);
+
+  const acted = await runtime.act({
+    action_id: view.allowed_actions[0].action_id,
+    input: { title: "Disposable capacity planner" }
+  });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  const mutation = calls.find((row) => row.command === "mission.create");
+  assert.equal(mutation.payload.title, "Disposable capacity planner");
+});
+
 test("unclog_act re-fetches authority, binds mission/action/version, and rejects stale or arbitrary input", async () => {
   const root = repository();
   const mutations = [];

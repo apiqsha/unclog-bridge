@@ -29,7 +29,7 @@ test("persistent runtime installs an exact public package into an owned atomic d
   const bridgeHome = path.join(root, "bridge-home");
   let observed = null;
   const runtime = installPersistentRuntime({
-    version: "1.1.1",
+    version: "1.1.2",
     bridgeHome,
     nodePath: process.execPath,
     npmExecPath: path.join(root, "npm-cli.js"),
@@ -39,7 +39,7 @@ test("persistent runtime installs an exact public package into an owned atomic d
       const target = args[prefixIndex + 1];
       const packageRoot = path.join(target, "node_modules", "unclog-bridge");
       fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
-      fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "unclog-bridge", version: "1.1.1" }));
+      fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "unclog-bridge", version: "1.1.2" }));
       fs.writeFileSync(path.join(packageRoot, "src", "index.js"), "// verified runtime\n");
       return { status: 0, stdout: "installed" };
     }
@@ -48,10 +48,10 @@ test("persistent runtime installs an exact public package into an owned atomic d
   assert.equal(runtime.reused, false);
   assert.equal(fs.existsSync(runtime.entry), true);
   assert.equal(observed.command, process.execPath);
-  assert.ok(observed.args.includes("unclog-bridge@1.1.1"));
+  assert.ok(observed.args.includes("unclog-bridge@1.1.2"));
   assert.ok(observed.args.includes("--ignore-scripts"));
   assert.ok(observed.args.includes("--omit=dev"));
-  const reused = installPersistentRuntime({ version: "1.1.1", bridgeHome });
+  const reused = installPersistentRuntime({ version: "1.1.2", bridgeHome });
   assert.equal(reused.reused, true);
 });
 
@@ -66,7 +66,7 @@ test("Codex MCP registration is owned, deduplicated, restart-aware, and safely u
   const runtimeEntry = path.resolve(__dirname, "../src/index.js");
 
   const first = installHostedMcp({
-    version: "1.1.1",
+    version: "1.1.2",
     client: "codex",
     workspaceRoot: repository,
     homeDir,
@@ -77,7 +77,7 @@ test("Codex MCP registration is owned, deduplicated, restart-aware, and safely u
     allowExternalRuntime: true
   });
   const second = installHostedMcp({
-    version: "1.1.1",
+    version: "1.1.2",
     client: "codex",
     workspaceRoot: repository,
     homeDir,
@@ -121,7 +121,7 @@ test("Claude, Cursor, and generic adapters preserve unrelated MCP servers", () =
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { existing: { command: "existing-tool" } }, preference: true }));
     const result = installHostedMcp({
-      version: "1.1.1",
+      version: "1.1.2",
       client,
       workspaceRoot: repository,
       homeDir,
@@ -153,7 +153,7 @@ test("client config conflicts fail closed without overwriting user-owned entries
   fs.writeFileSync(file, JSON.stringify({ mcpServers: { unclog: { command: "customer-owned" } } }));
   assert.throws(
     () => installHostedMcp({
-      version: "1.1.1",
+      version: "1.1.2",
       client: "cursor",
       workspaceRoot: repository,
       homeDir,
@@ -179,7 +179,7 @@ test("failed client registration rolls back a newly installed runtime and preser
   fs.writeFileSync(file, JSON.stringify(customerConfig));
 
   assert.throws(() => installHostedMcp({
-    version: "1.1.1",
+    version: "1.1.2",
     client: "cursor",
     workspaceRoot: repository,
     homeDir,
@@ -190,14 +190,14 @@ test("failed client registration rolls back a newly installed runtime and preser
       const target = args[args.indexOf("--prefix") + 1];
       const packageRoot = path.join(target, "node_modules", "unclog-bridge");
       fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
-      fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "unclog-bridge", version: "1.1.1" }));
+      fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "unclog-bridge", version: "1.1.2" }));
       fs.writeFileSync(path.join(packageRoot, "src", "index.js"), "// candidate runtime\n");
       return { status: 0 };
     }
   }), (error) => error.code === "client_config_conflict");
 
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), customerConfig);
-  assert.equal(fs.existsSync(path.join(bridgeHome, "runtime", "1.1.1")), false);
+  assert.equal(fs.existsSync(path.join(bridgeHome, "runtime", "1.1.2")), false);
   assert.equal(fs.existsSync(path.join(bridgeHome, "installation.json")), false);
 });
 
@@ -213,7 +213,7 @@ test("switching clients removes only the previous managed entry and keeps unrela
   fs.writeFileSync(path.join(codexHome, "config.toml"), "model = \"customer-model\"\n");
   fs.writeFileSync(cursorFile, JSON.stringify({ mcpServers: { other: { command: "other" } }, theme: "dark" }));
   const common = {
-    version: "1.1.1",
+    version: "1.1.2",
     workspaceRoot: repository,
     homeDir,
     bridgeHome,
@@ -246,7 +246,7 @@ test("doctor rejects duplicated or tampered managed configuration", () => {
   const file = path.join(codexHome, "config.toml");
   fs.writeFileSync(file, "model = \"gpt-5\"\n");
   installHostedMcp({
-    version: "1.1.1",
+    version: "1.1.2",
     client: "codex",
     workspaceRoot: repository,
     homeDir,

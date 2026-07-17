@@ -181,10 +181,17 @@ const LOCAL_FIELD_GUIDE = {
   runtime_identity: "Stable identity of the runtime resuming or replacing the logical worker lane.",
   summary: "Compact completion summary for the current action set.",
   text: "Workflow text, not repository contents.",
+  title: "Compact mission title describing the confirmed customer outcome.",
   verified: "Explicit confirmation that a replacement runtime was verified by the authoritative controller."
 };
 
 const COMMAND_GATE_CONTRACTS = {
+  "mission.create": {
+    gate: "mission",
+    requiredFields: ["title"],
+    responseKeys: ["mission", "mission_id", "goal_progress", "validation_status"],
+    workflowGates: ["confirmed_goal_intake", "mission_state_update"]
+  },
   "goals.lock": {
     gate: "goal_lock",
     requiredFields: ["file"],
