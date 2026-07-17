@@ -17,23 +17,18 @@ const {
   assertHostedResponseEnvelope,
   assertHostedCommandContract,
   blockedState,
-  buildAdapterPrompt,
   callHostedCommand,
   callHostedProjectLink,
   callHostedSessionRevoke,
-  composeHostedCliOutput,
   connectWithSetupIntent,
   createBridgeClient,
   hostedCommandStatus,
   hostedResponseContract,
-  installHostedAdapter,
   logout,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
-  presentHostedResult,
   reconcilePendingLocalArtifactEffects,
-  renderCanonicalHostedCommand,
-  renderHostedGuidance,
+  retireHostedAdapters,
   repositoryIdentity,
   writeHostedOutputFile
 } = require("../src/index");
@@ -61,6 +56,21 @@ function memoryCredentialStore() {
 
 function tempStorage() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "unclog-bridge-"));
+}
+
+function fakeMcpInstall(options = {}) {
+  return {
+    installed: true,
+    persistent: true,
+    serverName: "unclog",
+    client: options.client,
+    packageVersion: "1.1.0",
+    runtimeReused: false,
+    configPath: path.join(options.homeDir, ".codex", "config.toml"),
+    workspaceRoot: options.workspaceRoot,
+    restartRequired: true,
+    nextStep: "Restart or reload the client once, then start a new task and say: Use Unclog."
+  };
 }
 
 function artifactHash(document) {
@@ -365,7 +375,9 @@ test("hosted response contracts expose local CLI response gates", () => {
   assert.deepEqual(actionCheck.requiredFields, ["action_id", "file"]);
   assert.ok(actionCheck.responseKeys.includes("next_action"));
   assert.ok(actionCheck.responseKeys.includes("commands_now"));
-  assert.ok(actionCheck.responseKeys.includes("recovery"));
+  assert.ok(actionCheck.responseKeys.includes("submitted_action"));
+  assert.ok(actionCheck.responseKeys.includes("controller_freshness_note"));
+  assert.ok(!actionCheck.responseKeys.includes("recovery"));
   assert.ok(actionCheck.workflowGates.includes("current_action_set"));
   assert.equal(actionCheck.proofRequired, true);
 
@@ -387,11 +399,14 @@ test("hosted response contracts expose local CLI response gates", () => {
     "agent_progress",
     "completion_contract",
     "assigned_goal_lines",
-    "assigned_scope",
-    "selected_scope_tiny_goal_ids",
-    "current_action_set",
-    "proof_commands",
-    "blockers",
+    "current_assigned_scope",
+    "current_round_goal",
+    "locked_selected_small_goal_ids",
+    "action_plan_selection",
+    "current_action_cursor",
+    "proof_template_command",
+    "proof_lint_command",
+    "proof_submit_command",
     "worker_files"
   ]) {
     assert.ok(agentPacket.responseKeys.includes(key), key);
@@ -423,7 +438,6 @@ test("bridge only forwards hosted command contract names", async () => {
     assert.equal(assertHostedCommandContract(command), command);
     assert.equal(contract.command, command);
     assert.ok(contract.responseKeys.includes("next_action"), command);
-    assert.ok(contract.responseKeys.includes("recovery"), command);
   }
 
   for (const command of [
@@ -538,7 +552,6 @@ test("bridge executable inventory covers the local parser and rejects removed So
       assert.equal(contract.command, command);
       assert.ok(contract.responseKeys.includes("status"), command);
       assert.ok(contract.responseKeys.includes("next_action"), command);
-      assert.ok(contract.responseKeys.includes("recovery"), command);
     }
   }
   for (const command of removedSocialCommands) {
@@ -1030,13 +1043,7 @@ test("thin bridge archives an accepted local draft idempotently and keeps recove
   }
 });
 
-test("adapter prompt is minimal and useless without server auth", async () => {
-  const prompt = buildAdapterPrompt("Codex");
-  const rendered = prompt.toLowerCase();
-  assert.match(rendered, /server authorization/);
-  assert.match(rendered, /thin/);
-  assert.doesNotMatch(rendered, /controller_internals|policy_prompt|core_rulebook|full_brain/);
-
+test("bridge rejects protected controller material before hosted transport", async () => {
   await assert.rejects(
     () =>
       callHostedCommand({
@@ -1049,303 +1056,6 @@ test("adapter prompt is minimal and useless without server auth", async () => {
   );
 });
 
-test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
-  assert.equal(
-    renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
-    "npx --yes unclog-bridge@1.0.12 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
-  );
-  const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.12 drafts list/);
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.12 goals template --draft/);
-  assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
-  assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
-  assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
-});
-
-test("default customer presentation is compact, executable, and keeps raw diagnostics opt-in", () => {
-  const hosted = hostedOk("drafts.list", {
-    commands_now: ["unclog --json drafts list"],
-    next_action: {
-      code: "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT",
-      command: "unclog --json drafts list",
-      commands_now: ["unclog --json drafts list"]
-    },
-    drafts: [
-      { draft_id: "D-active", status: "intake", editable: true },
-      { draft_id: "D-history", status: "submitted", editable: false }
-    ],
-    domain: { response: { duplicated: true } },
-    source: { kind: "hosted-api" },
-    agent_instruction: {
-      schema: "unclog-agent-instruction/1",
-      instruction_id: "UGI_test",
-      guidance_sha256: "server-hash",
-      guidance_markdown: "Run `unclog --json drafts list`.",
-      transport: { canonical_command_notation_only: true }
-    }
-  });
-  const compact = presentHostedResult(hosted);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 drafts list");
-  assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
-  assert.equal(compact.next_action.command, compact.commands_now[0]);
-  assert.equal(compact.drafts.length, 1);
-  assert.equal(compact.drafts[0].draft_id, "D-active");
-  assert.equal(compact.draft_summary.submitted_history_count, 1);
-  assert.equal(compact.domain, undefined);
-  assert.equal(compact.source, undefined);
-  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.12 drafts list/);
-  assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
-  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.12");
-
-  const raw = presentHostedResult(hosted, { raw: true });
-  assert.equal(raw.commands_now[0], "unclog --json drafts list");
-  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.12 drafts list");
-  assert.equal(raw.drafts.length, 2);
-  assert.deepEqual(raw.domain, { response: { duplicated: true } });
-});
-
-test("default draft presentation adds bounded local context without changing the hosted payload", () => {
-  const repository = tempStorage();
-  fs.mkdirSync(path.join(repository, ".git"));
-  const emptyId = "D20260717-120000-a1b2c3";
-  const filledId = "D20260717-120100-d4e5f6";
-  const makeDraft = (draftId, goals, updatedAt) => {
-    const directory = path.join(repository, ".unclog-drafts", draftId);
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, "unclog_goals.json"), JSON.stringify({ goals }, null, 2));
-    fs.writeFileSync(path.join(directory, "status.json"), JSON.stringify({
-      draft_id: draftId,
-      kind: "goals_intake",
-      status: "intake",
-      mission_id: null,
-      goals_file: "unclog_goals.json",
-      created_at: updatedAt,
-      updated_at: updatedAt
-    }, null, 2));
-    return {
-      draft_id: draftId,
-      status: "intake",
-      status_file: `.unclog-drafts/${draftId}/status.json`,
-      file: `.unclog-drafts/${draftId}/unclog_goals.json`,
-      editable: true
-    };
-  };
-  const empty = makeDraft(emptyId, [], "2026-07-17T04:00:00Z");
-  const longText = "A cold agent can identify the correct active draft ".repeat(6).trim();
-  const filled = makeDraft(filledId, [{ text: longText, children: [] }], "2026-07-17T04:01:00Z");
-  const hosted = hostedOk("drafts.list", {
-    drafts: [filled, empty],
-    commands_now: ["unclog --json drafts list"]
-  });
-
-  const presented = presentHostedResult(hosted, { cwd: repository });
-  assert.deepEqual(presented.drafts.map((draft) => draft.local_preview.state), ["has_goals", "empty"]);
-  assert.equal(presented.drafts[0].local_preview.top_level_goal_count, 1);
-  assert.equal(presented.drafts[0].local_preview.last_edited_at, "2026-07-17T04:01:00Z");
-  assert.ok(presented.drafts[0].local_preview.first_big_goal.length <= 160);
-  assert.equal(presented.drafts[1].local_preview.first_big_goal, null);
-  assert.equal(presented.draft_summary.empty_count, 1);
-  assert.equal(presented.draft_summary.with_goals_count, 1);
-  assert.equal(presented.draft_summary.preview_unavailable_count, 0);
-  assert.match(presented.draft_summary.selection_rule, /recency alone is not a semantic match/);
-
-  const raw = presentHostedResult(hosted, { raw: true, cwd: repository });
-  assert.equal(raw.drafts[0].local_preview, undefined);
-  assert.equal(raw.drafts[0].first_big_goal, undefined);
-});
-
-test("manager monitoring keeps actionable guidance while duplicate state projections remain raw-only", () => {
-  const hosted = hostedOk("agents.status", {
-    project: { id: "unclog", projectVersion: 20 },
-    manager_monitoring_guidance: {
-      watch_command: "unclog --mission M001 --json agents watch",
-      counts: { active: 1, pending: 0, blocked: 0, stale: 0, needs_attention: 0, done: 0 }
-    },
-    worker_monitor_signals: [{ agent_id: "sub-1", status: "active", worker_next_code: "SUBMIT_ACTION_PLAN" }],
-    worker_status_counts: { total: 1, active: 1, pending: 0, blocked: 0, stale: 0, needs_attention: 0, done: 0 },
-    active_worker_count: 1,
-    pending_worker_count: 0,
-    agent_assignment: { agents: [{ id: "sub-1", assigned_goal_ids: ["G001"] }] },
-    agent_status_counts: { total: 2, active: 2 },
-    agents: [{ id: "sub-1", status: "active", roots: [{ goal_id: "G001" }] }],
-    agent_progress: { agents: [{ id: "sub-1", status: "active" }] },
-    constraints: [{ id: "correctness_first" }],
-    manager_live_notes: { total: 1, open: 1, open_notes: [{ id: "N001" }] },
-    do_not: ["Do not impersonate a worker."],
-    commands_now: ["unclog --mission M001 --json agents watch"],
-    required_fields: [],
-    field_guide: {},
-    local_artifacts: { applied: 0 },
-    adapter_refresh: { customerSafe: true },
-    agent_instruction: {
-      guidance_sha256: "server-hash",
-      guidance_markdown: "Full live hosted phase guidance remains available.",
-      transport: { canonical_command_notation_only: true }
-    }
-  });
-
-  const compact = presentHostedResult(hosted);
-  assert.equal(compact.output_view.mode, "compact_manager_monitor");
-  assert.equal(compact.agent_assignment, undefined);
-  assert.equal(compact.agents, undefined);
-  assert.equal(compact.agent_progress, undefined);
-  assert.equal(compact.constraints, undefined);
-  assert.equal(compact.active_worker_count, undefined);
-  assert.equal(compact.required_fields, undefined);
-  assert.equal(compact.field_guide, undefined);
-  assert.deepEqual(compact.worker_status_counts, hosted.worker_status_counts);
-  assert.deepEqual(compact.worker_monitor_signals, hosted.worker_monitor_signals);
-  assert.deepEqual(compact.manager_live_notes, hosted.manager_live_notes);
-  assert.equal(compact.agent_instruction.guidance_markdown, undefined);
-  assert.match(compact.agent_instruction.guidance_delivery, /omits repeated full phase guidance/);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 --mission M001 agents watch");
-  assert.equal(compact.next, undefined);
-  assert.equal(compact.bridge_commands_now, undefined);
-
-  const raw = presentHostedResult(hosted, { raw: true });
-  assert.deepEqual(raw.agent_assignment, hosted.agent_assignment);
-  assert.deepEqual(raw.agents, hosted.agents);
-  assert.deepEqual(raw.agent_progress, hosted.agent_progress);
-  assert.deepEqual(raw.constraints, hosted.constraints);
-  assert.deepEqual(raw.local_artifacts, hosted.local_artifacts);
-});
-
-test("manager watch keeps observed stale recovery while duplicate assignment projections remain raw-only", () => {
-  const hosted = hostedOk("agents.watch", {
-    project: { id: "unclog", projectVersion: 21 },
-    counts: { checked: 1, healthy: 0, stale: 1, needs_attention: 0, skipped_not_due: 0, excluded: 0 },
-    rows: [{
-      agent_id: "sub-1",
-      status: "stale",
-      reason: "handoff_unconfirmed",
-      progress_status: "pending",
-      handoff_status: "awaiting_worker_packet",
-      handoff_command: "unclog --mission M001 --json agents handoff --agent-id sub-1"
-    }],
-    events: [],
-    next_action: {
-      code: "HANDLE_ATTENTION_WORKERS",
-      attention_kind: "handoff_unconfirmed",
-      command: "unclog --mission M001 --json agents handoff --agent-id sub-1",
-      commands_now: ["unclog --mission M001 --json agents handoff --agent-id sub-1"]
-    },
-    commands_now: ["unclog --mission M001 --json agents handoff --agent-id sub-1"],
-    agent_assignment: { agents: [{ id: "sub-1", assigned_goal_ids: ["G001"] }] },
-    agents: [{ id: "sub-1", status: "pending", roots: [{ goal_id: "G001" }] }],
-    agent_progress: { agents: [{ id: "sub-1", status: "pending" }] },
-    constraints: [{ id: "correctness_first" }],
-    local_artifacts: { applied: 0 },
-    adapter_refresh: { customerSafe: true },
-    agent_instruction: {
-      guidance_sha256: "server-hash",
-      guidance_markdown: "Full live hosted worker-scope guidance remains available.",
-      transport: { canonical_command_notation_only: true }
-    }
-  });
-
-  const compact = presentHostedResult(hosted);
-  assert.equal(compact.output_view.mode, "compact_manager_watch");
-  assert.deepEqual(compact.counts, hosted.counts);
-  assert.deepEqual(compact.rows, [{
-    agent_id: "sub-1",
-    status: "stale",
-    reason: "handoff_unconfirmed",
-    progress_status: "pending",
-    handoff_status: "awaiting_worker_packet",
-    handoff_command: "npx --yes unclog-bridge@1.0.12 --mission M001 agents handoff --agent-id sub-1"
-  }]);
-  assert.equal(compact.next_action.code, "HANDLE_ATTENTION_WORKERS");
-  assert.equal(compact.next_action.attention_kind, "handoff_unconfirmed");
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.12 --mission M001 agents handoff --agent-id sub-1");
-  assert.equal(compact.agent_assignment, undefined);
-  assert.equal(compact.agents, undefined);
-  assert.equal(compact.agent_progress, undefined);
-  assert.equal(compact.constraints, undefined);
-  assert.equal(compact.agent_instruction.guidance_markdown, undefined);
-  assert.match(compact.agent_instruction.guidance_delivery, /omits repeated full phase guidance/);
-  assert.equal(compact.state_store, undefined);
-  assert.equal(compact.watchdog_mode, undefined);
-  assert.equal(compact.next, undefined);
-  assert.equal(compact.bridge_commands_now, undefined);
-
-  const raw = presentHostedResult(hosted, { raw: true });
-  assert.deepEqual(raw.agent_assignment, hosted.agent_assignment);
-  assert.deepEqual(raw.agents, hosted.agents);
-  assert.deepEqual(raw.agent_progress, hosted.agent_progress);
-});
-
-test("routine manager monitoring hides no-op local reconciliation while other commands retain it", () => {
-  const localArtifacts = { applied: 0, reconciled: true };
-  const adapterRefresh = { tool: "codex", removedLegacyAdapter: false };
-  const compact = composeHostedCliOutput(
-    { status: "OK", output_view: { mode: "compact_manager_watch" } },
-    { localArtifacts, adapterRefresh }
-  );
-  assert.equal(compact.local_artifacts, undefined);
-  assert.equal(compact.adapter_refresh, undefined);
-
-  const normal = composeHostedCliOutput(
-    { status: "OK" },
-    { localArtifacts, adapterRefresh }
-  );
-  assert.deepEqual(normal.local_artifacts, localArtifacts);
-  assert.deepEqual(normal.adapter_refresh, adapterRefresh);
-});
-
-test("worker handoff defaults to the exact cold-worker prompt without manager diagnostics", () => {
-  const hosted = hostedOk("agents.handoff", {
-    project: { id: "unclog", projectVersion: 20 },
-    billing: { provider: "merchant_of_record" },
-    contract: { normal_command_count: 104 },
-    device: { state: "approved" },
-    manager_instruction: "Give first_prompt to a separate worker thread.",
-    handoff_issued_at: "2026-07-17T11:58:15Z",
-    handoff_ack_rule: "The worker acknowledges by fetching its packet.",
-    mission_id: "M001",
-    agent_id: "sub-1",
-    label: "Hosted worker",
-    worker_status: "pending",
-    assigned_root_ids: ["G001"],
-    manager_reference_media_count: 0,
-    packet_command: "unclog --mission M001 --json agents packet --agent-id sub-1 --focus",
-    first_prompt: "Start by running: `npx --yes unclog-bridge@1.0.12 --mission M001 agents packet --agent-id sub-1 --focus`",
-    transport: "official_thin_bridge",
-    customer_safe: true,
-    handoff_required: true,
-    after_handoff_command: "unclog --mission M001 --json agents status",
-    commands_now: [],
-    agent_instruction: {
-      schema: "unclog-agent-instruction/1",
-      instruction_id: "UGI_handoff",
-      phase: "worker_scope",
-      next_action_code: "WORKER_THREAD_HANDOFF_REQUIRED",
-      authority: "hosted_unclog_server",
-      guidance_sha256: "server-hash",
-      guidance_markdown: "Full manager phase guidance is intentionally large.",
-      transport: { canonical_command_notation_only: true }
-    }
-  });
-
-  const compact = presentHostedResult(hosted);
-  assert.equal(compact.output_view.mode, "compact_worker_handoff");
-  assert.match(compact.first_prompt, /npx --yes unclog-bridge@1\.0\.12 --mission M001 agents packet --agent-id sub-1 --focus/);
-  assert.equal(compact.billing, undefined);
-  assert.equal(compact.contract, undefined);
-  assert.equal(compact.device, undefined);
-  assert.equal(compact.agent_instruction.guidance_markdown, undefined);
-  assert.match(compact.agent_instruction.guidance_delivery, /separate worker receives complete live guidance/);
-  const composed = composeHostedCliOutput(compact, {
-    localArtifacts: { applied: 0, reconciled: true },
-    adapterRefresh: { tool: "codex", removedLegacyAdapter: false }
-  });
-  assert.equal(composed.local_artifacts, undefined);
-  assert.equal(composed.adapter_refresh, undefined);
-
-  const raw = presentHostedResult(hosted, { raw: true });
-  assert.deepEqual(raw.billing, hosted.billing);
-  assert.equal(raw.agent_instruction.guidance_markdown, hosted.agent_instruction.guidance_markdown);
-});
-
 test("raw and debug presentation flags never enter the hosted workflow payload", () => {
   const parsed = parseHostedCommandArgv(["drafts", "list", "--raw", "--debug"]);
   assert.equal(parsed.command, "drafts.list");
@@ -1355,35 +1065,24 @@ test("raw and debug presentation flags never enter the hosted workflow payload",
   assert.deepEqual(parsed.payload.cli_argv, ["drafts", "list"]);
 });
 
-test("customer adapters use discoverable Agent Skills paths and safely retire only owned Claude legacy files", () => {
+test("MCP migration retires only bridge-owned legacy skill files", () => {
   const homeDir = tempStorage();
   const legacyPath = path.join(homeDir, ".claude", "commands", "unclog-hosted.md");
+  const claudeSkill = path.join(homeDir, ".claude", "skills", "unclog-hosted", "SKILL.md");
+  const codexSkill = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
   fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+  fs.mkdirSync(path.dirname(claudeSkill), { recursive: true });
+  fs.mkdirSync(path.dirname(codexSkill), { recursive: true });
   fs.writeFileSync(legacyPath, "<!-- unclog-hosted-adapter-v1 -->\nlegacy hosted adapter\n");
+  fs.writeFileSync(claudeSkill, "<!-- unclog-hosted-adapter-v2 -->\nlegacy hosted skill\n");
+  fs.writeFileSync(codexSkill, "customer-owned skill\n");
 
-  const claude = installHostedAdapter("claude", homeDir);
-  const claudePath = path.join(homeDir, ".claude", "skills", "unclog-hosted", "SKILL.md");
-  assert.equal(claude.path, "~/.claude/skills/unclog-hosted/SKILL.md");
-  assert.equal(claude.removedLegacyAdapter, true);
+  const retired = retireHostedAdapters(homeDir);
   assert.equal(fs.existsSync(legacyPath), false);
-  assert.match(fs.readFileSync(claudePath, "utf8"), /^---\nname: unclog-hosted\ndescription: /);
-
-  const userOwnedLegacy = path.join(homeDir, ".claude", "commands", "unclog-hosted.md");
-  fs.writeFileSync(userOwnedLegacy, "user-owned command\n");
-  const claudeRefresh = installHostedAdapter("claude", homeDir);
-  assert.equal(claudeRefresh.removedLegacyAdapter, false);
-  assert.equal(fs.readFileSync(userOwnedLegacy, "utf8"), "user-owned command\n");
-
-  const codex = installHostedAdapter("codex", homeDir);
-  assert.equal(codex.path, "~/.agents/skills/unclog-hosted/SKILL.md");
-  assert.match(
-    fs.readFileSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md"), "utf8"),
-    /agent_instruction\.guidance_markdown/
-  );
-  assert.match(
-    fs.readFileSync(path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md"), "utf8"),
-    /compact `guidance_delivery` identity/
-  );
+  assert.equal(fs.existsSync(claudeSkill), false);
+  assert.equal(fs.readFileSync(codexSkill, "utf8"), "customer-owned skill\n");
+  assert.equal(retired.retired.length, 2);
+  assert.equal(retired.preservedNonOwnedFiles, true);
 });
 
 test("repository identity resolves the Git root and rejects setup outside a repository", () => {
@@ -1463,15 +1162,15 @@ test("setup connect clears a stale session reference whose credential is missing
   assert.equal(loadSessionReference({ storageDir, cwd, allowLocalHttp: true }), null);
 });
 
-test("adapter conflict preserves an existing working session", async () => {
+test("MCP config conflict fails before network and preserves an existing working session", async () => {
   const storageDir = tempStorage();
   const cwd = path.join(storageDir, "repo");
   const homeDir = path.join(storageDir, "customer-profile");
   const credentialStore = memoryCredentialStore();
   fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
-  const conflictPath = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
+  const conflictPath = path.join(homeDir, ".codex", "config.toml");
   fs.mkdirSync(path.dirname(conflictPath), { recursive: true });
-  fs.writeFileSync(conflictPath, "customer-owned adapter\n");
+  fs.writeFileSync(conflictPath, "[mcp_servers.unclog]\ncommand = \"customer-owned\"\n");
   const oldToken = `us_${"P".repeat(43)}`;
   saveSession({
     apiBaseUrl: "http://127.0.0.1:8080",
@@ -1517,14 +1216,13 @@ test("adapter conflict preserves an existing working session", async () => {
         }
       }
     ),
-    (error) => error instanceof BridgeServerError && error.code === "adapter_path_conflict"
+    (error) => error?.code === "client_config_conflict"
   );
   const loaded = loadSession({ storageDir, cwd, allowLocalHttp: true, credentialStore });
   assert.equal(loaded.deviceSessionId, "00000000-0000-4000-8000-000000000091");
   assert.equal(loaded.sessionToken, oldToken);
-  const revokeCalls = calls.filter((call) => call.url.endsWith("/v1/bridge/session/revoke"));
-  assert.equal(revokeCalls.length, 1);
-  assert.notEqual(revokeCalls[0].init.headers.authorization, `Bearer ${oldToken}`);
+  assert.equal(calls.length, 0);
+  assert.equal(fs.readFileSync(conflictPath, "utf8"), "[mcp_servers.unclog]\ncommand = \"customer-owned\"\n");
 });
 
 test("setup intent connect waits for approval, stores a protected credential, installs adapter, and returns hosted next", async () => {
@@ -1543,6 +1241,7 @@ test("setup intent connect waits for approval, stores a protected credential, in
     {
       cwd,
       homeDir,
+      installMcp: fakeMcpInstall,
       pollIntervalMs: 1,
       pollRetryBaseMs: 1,
       fallbackDelayMs: 0,
@@ -1592,7 +1291,9 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.equal(result.ok, true);
   assert.equal(result.linked, true);
   assert.equal(result.status, "connected");
-  assert.equal(result.next_action.code, "CREATE_MISSION");
+  assert.equal(result.first_hosted_state.next_action.code, "CREATE_MISSION");
+  assert.equal(result.mcp.persistent, true);
+  assert.equal(result.shell_commands_required_after_setup, false);
   assert.equal(result.storage.persistedSecretMaterial, false);
   const loaded = loadSessionReference({ storageDir, cwd, allowLocalHttp: true });
   assert.equal(loaded.apiBaseUrl, "http://127.0.0.1:8080");
@@ -1600,12 +1301,7 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.equal(loaded.projectId, "proj_solo_primary");
   assert.equal(loadSession({ storageDir, cwd, allowLocalHttp: true, credentialStore }).sessionToken.startsWith("us_"), true);
   const adapterPath = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
-  assert.equal(fs.existsSync(adapterPath), true);
-  const adapterText = fs.readFileSync(adapterPath, "utf8");
-  assert.match(adapterText, /^---\nname: unclog-hosted\ndescription: /);
-  assert.match(adapterText, /start, continue, resume, or check Unclog work/);
-  assert.match(adapterText, /Do not guess the next workflow command/);
-  assert.match(adapterText, /<!-- unclog-hosted-adapter-v2 -->/);
+  assert.equal(fs.existsSync(adapterPath), false);
   assert.equal(fs.existsSync(path.join(cwd, ".agents", "skills", "unclog-hosted", "SKILL.md")), false);
   assert.equal(statuses[0].stage, "waiting_for_dashboard_approval");
   assert.equal(statuses.some((status) => status.stage === "approval_poll_retry"), true);
@@ -1643,6 +1339,7 @@ test("setup intent connect detects and revokes an existing bridge session before
     {
       cwd,
       homeDir,
+      installMcp: fakeMcpInstall,
       pollIntervalMs: 1,
       sessionOptions: { storageDir, cwd, allowLocalHttp: true, credentialStore },
       fetchImpl: async (url, init) => {

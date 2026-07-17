@@ -17,6 +17,13 @@ const {
   SessionStorageError,
   sessionStorageContract
 } = require("./session");
+const {
+  installHostedMcp,
+  installationDoctor,
+  loadInstallation,
+  preflightHostedMcp,
+  uninstallHostedMcp
+} = require("./install");
 
 const COMMAND_ENDPOINT = "/v1/bridge/commands";
 const PROJECT_LINK_ENDPOINT = "/v1/bridge/project-link";
@@ -156,7 +163,7 @@ const HOSTED_UNSUPPORTED_COMMAND_CONTRACTS = new Set([
   ...HOSTED_REMOVED_COMMAND_CONTRACTS
 ]);
 const HOSTED_LOCAL_CONTRACT_VERSION = "hosted_local_cli_parity_v1";
-const LOCAL_RESPONSE_BASE_KEYS = ["status", "next_action", "next", "commands_now", "recovery"];
+const LOCAL_RESPONSE_BASE_KEYS = ["status", "next_action", "next", "commands_now"];
 const LOCAL_STATUS_VALUES = ["OK", "REJECTED", "ERROR"];
 
 const LOCAL_FIELD_GUIDE = {
@@ -216,14 +223,14 @@ const COMMAND_GATE_CONTRACTS = {
     gate: "current_action_set",
     requiredFields: ["action_id", "file"],
     responseKeys: [
-      "checked_action",
-      "current_action_set_id",
+      "submitted_action",
+      "controller_freshness_note",
       "remaining_unchecked_count",
       "unchecked_count",
       "first_unchecked_action",
       "proof_file_command",
       "bulk_proof_hint",
-      "submit_ready",
+      "challenge_prompt",
       "required_fields",
       "field_guide"
     ],
@@ -304,15 +311,18 @@ const COMMAND_GATE_CONTRACTS = {
   "agents.packet": {
     gate: "worker_next_action",
     responseKeys: [
+      "packet_view",
       "agent_progress",
       "completion_contract",
       "assigned_goal_lines",
-      "assigned_scope",
-      "selected_scope_tiny_goal_ids",
-      "current_action_set",
-      "proof_commands",
-      "blockers",
-      "recovery",
+      "current_assigned_scope",
+      "current_round_goal",
+      "locked_selected_small_goal_ids",
+      "action_plan_selection",
+      "current_action_cursor",
+      "proof_template_command",
+      "proof_lint_command",
+      "proof_submit_command",
       "worker_files"
     ],
     workflowGates: ["worker_next_action", "worker_blocker_state"]
@@ -773,15 +783,6 @@ function assertNoLocalBrain(value) {
   }
 }
 
-function buildAdapterPrompt(toolName = "AI coding tool") {
-  return [
-    `${toolName} should call the local Unclog bridge for workflow actions.`,
-    "The bridge is intentionally thin and has no protected Unclog brain.",
-    "Every useful command requires hosted server authorization before mutation.",
-    "Do not paste repositories, source files, patches, diffs, tokens, or secrets into bridge payloads."
-  ].join(" ");
-}
-
 function parseFlagArgs(argv) {
   const flags = {};
   const assignFlag = (key, value) => {
@@ -1161,12 +1162,12 @@ function attachWorkflowDocuments(command, payload, flagTokens, options = {}) {
   }
   const closeoutPath = flags["closeout-sweep-file"];
   if (closeoutPath) {
-    payload.closeout_sweep = readWorkflowJson(closeoutPath, "--closeout-sweep-file");
+    payload.closeout_sweep = readWorkflowJson(path.resolve(options.cwd || process.cwd(), String(closeoutPath)), "--closeout-sweep-file");
     payload.closeout_sweep_file = "closeout.json";
   }
   const goalContractPath = flags["goal-contract-file"];
   if (goalContractPath) {
-    payload.goal_contract_document = readWorkflowJson(goalContractPath, "--goal-contract-file");
+    payload.goal_contract_document = readWorkflowJson(path.resolve(options.cwd || process.cwd(), String(goalContractPath)), "--goal-contract-file");
     payload.goal_contract_file = "goal-contract.json";
   }
   if (payload.metadata && payload.metadata.flags) {
@@ -1188,7 +1189,7 @@ function requiredReviewLifecycleStage(command, payload) {
   return null;
 }
 
-function attachReviewLifecycle(command, payload, flagTokens) {
+function attachReviewLifecycle(command, payload, flagTokens, options = {}) {
   const flags = parseFlagArgs(flagTokens);
   const filePath = flags["review-lifecycle-file"];
   const hasFileFlag = Object.prototype.hasOwnProperty.call(flags, "review-lifecycle-file");
@@ -1210,7 +1211,7 @@ function attachReviewLifecycle(command, payload, flagTokens) {
       { ...blockedState("REVIEW_LIFECYCLE_FILE_REQUIRED"), status: "ERROR", code: "REVIEW_LIFECYCLE_FILE_REQUIRED" }
     );
   }
-  const lifecycle = readWorkflowJson(filePath, "--review-lifecycle-file");
+  const lifecycle = readWorkflowJson(path.resolve(options.cwd || process.cwd(), String(filePath)), "--review-lifecycle-file");
   if (String(lifecycle.stage || "").trim() !== expectedStage) {
     throw new BridgeServerError(
       "REVIEW_LIFECYCLE_STAGE_COMMAND_MISMATCH",
@@ -1633,7 +1634,7 @@ function parseHostedCommandArgv(argv = [], options = {}) {
       if (status.command === "drafts.list" || status.command === "next") {
         payload.local_artifacts = collectDraftStatusArtifacts(options);
       }
-      attachReviewLifecycle(status.command, payload, flagTokens);
+      attachReviewLifecycle(status.command, payload, flagTokens, options);
       payload.cli_argv = canonicalCliArgv(status.command, positionals, flagTokens);
       return {
         command: status.command,
@@ -1662,6 +1663,7 @@ function sessionOptionsFor(apiBaseUrl, options = {}) {
 function repositoryIdentity(cwd = process.cwd()) {
   const gitRoot = resolveGitRoot(cwd);
   return {
+    root: gitRoot,
     label: path.basename(gitRoot) || "Repository",
     fingerprint: crypto.createHash("sha256").update(gitRoot).digest("hex")
   };
@@ -1746,356 +1748,23 @@ async function postDeviceJson(activeFetch, apiBaseUrl, endpoint, body) {
   return data;
 }
 
-function renderCanonicalHostedCommand(value) {
-  if (typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!/^unclog(?:\.exe)?\s+--[a-z0-9-]+(?:\s|$)/i.test(trimmed)) return value;
-  const args = trimmed
-    .replace(/^unclog(?:\.exe)?\s*/i, "")
-    .replace(/(^|\s)--json(?=\s|$)/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-  return `npx --yes unclog-bridge@${BRIDGE_VERSION}${args ? ` ${args}` : ""}`;
-}
-
-function renderHostedGuidance(markdown) {
-  if (typeof markdown !== "string") return markdown;
-  return markdown
-    .replace(/`unclog(?:\.exe)?\s+(--[a-z0-9-]+[^`\r\n]*)`/gi, (_match, args) => `\`${renderCanonicalHostedCommand(`unclog ${args}`)}\``)
-    .replace(/(^|\n)([ \t]*)unclog(?:\.exe)?\s+(--[a-z0-9-]+[^\r\n]*)/gi, (_match, lead, indent, args) => (
-      `${lead}${indent}${renderCanonicalHostedCommand(`unclog ${args}`)}`
-    ));
-}
-
-function renderHostedTransport(value, key = "") {
-  if (Array.isArray(value)) return value.map((item) => renderHostedTransport(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([childKey, child]) => [childKey, renderHostedTransport(child, childKey)])
-    );
-  }
-  if (typeof value !== "string") return value;
-  if (key === "guidance_markdown") return renderHostedGuidance(value);
-  return renderCanonicalHostedCommand(value);
-}
-
-function boundedDraftPreviewText(value, maxChars = 160) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (!text) return null;
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
-}
-
-function readLocalDraftPreview(draft, options = {}) {
-  try {
-    const root = options.root || resolveGitRoot(options.cwd || process.cwd());
-    const goalsPath = resolveDraftArtifactPath(draft.file, { ...options, root });
-    const statusPath = resolveDraftArtifactPath(draft.status_file, { ...options, root });
-    if (goalsPath.name !== "unclog_goals.json" || statusPath.name !== "status.json" || goalsPath.draftId !== statusPath.draftId) {
-      throw new Error("local_draft_preview_path_mismatch");
-    }
-    const goalsDocument = readWorkflowJson(goalsPath.target, "local goals draft");
-    const statusDocument = readWorkflowJson(statusPath.target, "local draft status");
-    const goals = Array.isArray(goalsDocument.goals) ? goalsDocument.goals : [];
-    const firstGoal = goals.find((goal) => goal && typeof goal === "object");
-    return {
-      available: true,
-      state: goals.length === 0 ? "empty" : "has_goals",
-      top_level_goal_count: goals.length,
-      first_big_goal: boundedDraftPreviewText(firstGoal && firstGoal.text),
-      last_edited_at: String(statusDocument.updated_at || statusDocument.created_at || draft.updated_at || "") || null,
-      source: "bounded_local_draft_preview"
-    };
-  } catch {
-    return {
-      available: false,
-      state: "unavailable",
-      top_level_goal_count: null,
-      first_big_goal: null,
-      last_edited_at: String(draft.updated_at || "") || null,
-      source: "bounded_local_draft_preview"
-    };
-  }
-}
-
-function compactDraftListing(result, options = {}) {
-  if (result.command !== "drafts.list" || !Array.isArray(result.drafts)) return result;
-  const allDrafts = result.drafts;
-  const activeDrafts = allDrafts.filter((draft) => (
-    draft && draft.status === "intake" && draft.editable === true
-  )).map((draft) => ({
-    ...draft,
-    local_preview: readLocalDraftPreview(draft, options)
-  }));
-  const availablePreviews = activeDrafts.map((draft) => draft.local_preview).filter((preview) => preview.available);
-  return {
-    ...result,
-    drafts: activeDrafts,
-    draft_summary: {
-      active_editable_count: activeDrafts.length,
-      empty_count: availablePreviews.filter((preview) => preview.state === "empty").length,
-      with_goals_count: availablePreviews.filter((preview) => preview.state === "has_goals").length,
-      preview_unavailable_count: activeDrafts.length - availablePreviews.length,
-      submitted_history_count: allDrafts.filter((draft) => draft && draft.status === "submitted").length,
-      total_count: allDrafts.length,
-      default_view: "active_editable_only",
-      selection_rule: "Match the draft to the user's current request; recency alone is not a semantic match.",
-      create_new_when: "The request is clearly independent and no active draft matches.",
-      history_command: `npx --yes unclog-bridge@${BRIDGE_VERSION} drafts list --raw`
-    }
-  };
-}
-
-const MANAGER_MONITOR_REDUNDANT_KEYS = [
-  "billing",
-  "contract",
-  "device",
-  "command_state",
-  "capsule",
-  "active_worker_count",
-  "pending_worker_count",
-  "blocked_worker_count",
-  "stale_worker_count",
-  "needs_attention_worker_count",
-  "done_worker_count",
-  "agent_assignment",
-  "assignment_ready",
-  "assignment_needs_replan",
-  "mode",
-  "agent_count",
-  "agent_status_counts",
-  "active_agent_count",
-  "completed_agent_count",
-  "blocked_agent_count",
-  "stale_agent_count",
-  "needs_attention_agent_count",
-  "pending_agent_count",
-  "agents",
-  "agent_progress",
-  "constraints",
-  "next",
-  "bridge_commands_now",
-  "watchdog_mode",
-  "official_health_checker",
-  "routine_check",
-  "ai_invocations",
-  "device_pings",
-  "now",
-  "interval_minutes",
-  "stale_after_minutes",
-  "state_store",
-  "next_watch_at",
-  "main_validation_required",
-  "nudge_stale",
-  "cooldown_minutes",
-  "max_nudges",
-  "local_artifacts",
-  "adapter_refresh"
-];
-
-function compactManagerMonitoring(result) {
-  if (!result || !["agents.status", "agents.watch"].includes(result.command)) return result;
-  const statusShape = Boolean(result.manager_monitoring_guidance && result.worker_status_counts);
-  const watchShape = result.command === "agents.watch" && Array.isArray(result.rows) && result.counts && typeof result.counts === "object";
-  if (!statusShape && !watchShape) return result;
-  const compact = { ...result };
-  for (const key of MANAGER_MONITOR_REDUNDANT_KEYS) delete compact[key];
-  if (Array.isArray(compact.required_fields) && compact.required_fields.length === 0) delete compact.required_fields;
-  if (compact.field_guide && typeof compact.field_guide === "object" && Object.keys(compact.field_guide).length === 0) {
-    delete compact.field_guide;
-  }
-  if (compact.agent_instruction && typeof compact.agent_instruction === "object") {
-    const instruction = compact.agent_instruction;
-    compact.agent_instruction = {
-      schema: instruction.schema,
-      instruction_id: instruction.instruction_id,
-      phase: instruction.phase,
-      next_action_code: instruction.next_action_code,
-      authority: instruction.authority,
-      guidance_sha256: instruction.guidance_sha256,
-      canonical_guidance_sha256: instruction.canonical_guidance_sha256,
-      transport: instruction.transport,
-      guidance_delivery: "Routine manager monitoring omits repeated full phase guidance. Follow next_action and commands_now; the next non-monitor response carries the complete live guidance."
-    };
-    compact.agent_instruction = Object.fromEntries(
-      Object.entries(compact.agent_instruction).filter(([, value]) => value !== undefined)
-    );
-  }
-  if (watchShape) {
-    const rowKeys = [
-      "agent_id",
-      "status",
-      "reason",
-      "progress_status",
-      "age_minutes",
-      "stale_after_minutes",
-      "nudge_count",
-      "handoff_status",
-      "handoff_issued_at",
-      "handoff_acknowledged_at",
-      "handoff_command"
-    ];
-    compact.rows = compact.rows.map((row) => Object.fromEntries(
-      rowKeys
-        .filter((key) => Object.hasOwn(row, key))
-        .map((key) => [key, row[key]])
-    ));
-  }
-  compact.output_view = {
-    mode: watchShape ? "compact_manager_watch" : "compact_manager_monitor",
-    preserved: [
-      "next_action",
-      "commands_now",
-      "manager_monitoring_guidance",
-      "worker_monitor_signals",
-      "worker_status_counts",
-      "counts",
-      "rows",
-      "events",
-      "manager_live_notes",
-      "do_not",
-      "agent_instruction"
-    ].filter((key) => Object.hasOwn(compact, key)),
-    full_diagnostics: "Use --raw only for human diagnostics when this view lacks required context; never execute canonical bare unclog commands from raw output."
-  };
-  return compact;
-}
-
-function compactWorkerHandoff(result) {
-  if (!result || result.command !== "agents.handoff" || !result.first_prompt) return result;
-  const keys = [
-    "allowed",
-    "status",
-    "command",
-    "next_action",
-    "commands_now",
-    "project",
-    "manager_instruction",
-    "handoff_issued_at",
-    "handoff_ack_rule",
-    "mission_id",
-    "agent_id",
-    "label",
-    "worker_status",
-    "assigned_root_ids",
-    "manager_reference_media",
-    "manager_reference_media_count",
-    "packet_command",
-    "first_prompt",
-    "transport",
-    "customer_safe",
-    "handoff_required",
-    "after_handoff_command"
+function retireHostedAdapters(homeDir = os.homedir()) {
+  const ownedMarkers = ["<!-- unclog-hosted-adapter-v2 -->", "<!-- unclog-hosted-adapter-v1 -->"];
+  const relativePaths = [
+    path.join(".agents", "skills", "unclog-hosted", "SKILL.md"),
+    path.join(".claude", "skills", "unclog-hosted", "SKILL.md"),
+    path.join(".claude", "commands", "unclog-hosted.md")
   ];
-  const compact = Object.fromEntries(
-    keys.filter((key) => Object.hasOwn(result, key)).map((key) => [key, result[key]])
-  );
-  if (result.agent_instruction && typeof result.agent_instruction === "object") {
-    const instruction = result.agent_instruction;
-    compact.agent_instruction = Object.fromEntries(Object.entries({
-      schema: instruction.schema,
-      instruction_id: instruction.instruction_id,
-      phase: instruction.phase,
-      next_action_code: instruction.next_action_code,
-      authority: instruction.authority,
-      guidance_sha256: instruction.guidance_sha256,
-      canonical_guidance_sha256: instruction.canonical_guidance_sha256,
-      transport: instruction.transport,
-      guidance_delivery: "The manager only hands off first_prompt. The separate worker receives complete live guidance when it runs the packet command in that prompt."
-    }).filter(([, value]) => value !== undefined));
+  const removed = [];
+  for (const relative of relativePaths) {
+    const target = path.join(homeDir, relative);
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) continue;
+    const content = fs.readFileSync(target, "utf8");
+    if (!ownedMarkers.some((marker) => content.includes(marker))) continue;
+    fs.rmSync(target);
+    removed.push(path.join("~", relative).replaceAll("\\", "/"));
   }
-  compact.output_view = {
-    mode: "compact_worker_handoff",
-    preserved: [...keys, "agent_instruction"].filter((key) => Object.hasOwn(compact, key)),
-    full_diagnostics: "Use --raw only for human diagnostics; never execute canonical bare unclog commands from raw output."
-  };
-  return compact;
-}
-
-function composeHostedCliOutput(presented, options = {}) {
-  const viewMode = String(presented?.output_view?.mode || "");
-  const compactNoopLocalEffects = [
-    "compact_manager_monitor",
-    "compact_manager_watch",
-    "compact_worker_handoff"
-  ].includes(viewMode);
-  return {
-    ...presented,
-    ...(options.localOutput ? { local_output: options.localOutput } : {}),
-    ...(!compactNoopLocalEffects && options.localArtifacts ? { local_artifacts: options.localArtifacts } : {}),
-    ...(!compactNoopLocalEffects && options.adapterRefresh ? { adapter_refresh: options.adapterRefresh } : {})
-  };
-}
-
-function presentHostedResult(result, options = {}) {
-  const raw = options.raw === true;
-  const canonical = JSON.parse(JSON.stringify(result || {}));
-  const bridgeCommands = Array.isArray(canonical.commands_now)
-    ? canonical.commands_now.map(renderCanonicalHostedCommand)
-    : [];
-  if (raw) {
-    return { ...canonical, bridge_commands_now: bridgeCommands };
-  }
-  let rendered = renderHostedTransport(canonical);
-  rendered.bridge_commands_now = bridgeCommands;
-  if (rendered.agent_instruction && typeof rendered.agent_instruction === "object") {
-    const canonicalHash = String(canonical.agent_instruction?.guidance_sha256 || "");
-    const renderedGuidance = String(rendered.agent_instruction.guidance_markdown || "");
-    rendered.agent_instruction = {
-      ...rendered.agent_instruction,
-      canonical_guidance_sha256: canonicalHash,
-      guidance_sha256: crypto.createHash("sha256").update(renderedGuidance).digest("hex"),
-      transport: {
-        ...(rendered.agent_instruction.transport || {}),
-        canonical_command_notation_only: false,
-        executable_commands_field: "commands_now",
-        rendered_by_bridge_version: BRIDGE_VERSION
-      }
-    };
-  }
-  for (const key of ["command_status", "domain", "entitlement", "local_contract", "refresh", "source"]) {
-    delete rendered[key];
-  }
-  rendered = compactDraftListing(rendered, options);
-  rendered = compactManagerMonitoring(rendered);
-  rendered = compactWorkerHandoff(rendered);
-  return rendered;
-}
-
-function installHostedAdapter(tool, homeDir = os.homedir()) {
-  const marker = "<!-- unclog-hosted-adapter-v2 -->";
-  const ownedMarkers = [marker, "<!-- unclog-hosted-adapter-v1 -->"];
-  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nThis is a bootstrap only. Use the published \`unclog-bridge\` thin CLI; never use or install a private/local Unclog CLI and never edit \`.unclog\`. Only the active intake file under \`.unclog-drafts\` may be edited locally.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\`. When present, treat \`agent_instruction.guidance_markdown\` as the live phase skill selected by hosted Unclog. Routine manager status/watch may instead return a compact \`guidance_delivery\` identity; in that case \`next_action\`, \`commands_now\`, and \`do_not\` are sufficient. Execute only the bridge-rendered \`commands_now\`. Continue an existing \`local_draft.file\` instead of creating a duplicate. The server owns workflow state and the bridge owns transport. Do not guess the next workflow command or reconstruct the workflow locally. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
-  const relative = tool === "claude"
-    ? path.join(".claude", "skills", "unclog-hosted", "SKILL.md")
-    : path.join(".agents", "skills", "unclog-hosted", "SKILL.md");
-  const legacyRelative = tool === "claude"
-    ? path.join(".claude", "commands", "unclog-hosted.md")
-    : null;
-  const target = path.join(homeDir, relative);
-  if (fs.existsSync(target)) {
-    const existing = fs.readFileSync(target, "utf8");
-    if (!ownedMarkers.some((ownedMarker) => existing.includes(ownedMarker))) {
-      throw new BridgeServerError("adapter_path_conflict", `Unclog did not overwrite existing file ${relative}.`, blockedState("adapter_path_conflict"));
-    }
-  }
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
-  let removedLegacyAdapter = false;
-  if (legacyRelative) {
-    const legacyTarget = path.join(homeDir, legacyRelative);
-    if (fs.existsSync(legacyTarget) && ownedMarkers.some((ownedMarker) => fs.readFileSync(legacyTarget, "utf8").includes(ownedMarker))) {
-      fs.rmSync(legacyTarget);
-      removedLegacyAdapter = true;
-    }
-  }
-  return {
-    tool,
-    path: path.join("~", relative).replaceAll("\\", "/"),
-    customerSafe: true,
-    localWorkflowFallback: false,
-    removedLegacyAdapter
-  };
+  return { retired: removed, preservedNonOwnedFiles: true };
 }
 
 async function connectWithSetupIntent(argv = [], options = {}) {
@@ -2103,10 +1772,10 @@ async function connectWithSetupIntent(argv = [], options = {}) {
   const setupIntent = flags["setup-intent"];
   const tool = String(flags.tool || "").trim().toLowerCase();
   const apiBaseUrl = flags["api-base-url"] || process.env.UNCLOG_API_URL || "https://api.unclog.dev";
-  if (!setupIntent || !["codex", "claude"].includes(tool)) {
+  if (!setupIntent || !["codex", "claude", "cursor", "generic"].includes(tool)) {
     throw new BridgeServerError(
       "connect_args_required",
-      "Connect requires --setup-intent and --tool codex|claude.",
+      "Connect requires --setup-intent and --tool codex|claude|cursor|generic.",
       {
         blocked: true,
         reason: "connect_args_required",
@@ -2133,6 +1802,13 @@ async function connectWithSetupIntent(argv = [], options = {}) {
   }
   const activeFetch = resolveFetch(options.fetchImpl);
   const repository = repositoryIdentity(options.cwd || process.cwd());
+  const preflightMcp = options.preflightMcp || preflightHostedMcp;
+  preflightMcp({
+    client: tool,
+    homeDir: options.homeDir || os.homedir(),
+    bridgeHome: options.bridgeHome,
+    workspaceRoot: repository.root
+  });
   const retryMaterial = newDeviceAuthorizationMaterial();
   const authorizationBody = {
     setup_intent: String(setupIntent),
@@ -2266,8 +1942,31 @@ async function connectWithSetupIntent(argv = [], options = {}) {
   const session = { ...sessionRecord, sessionToken, allowLocalHttp: sessionOptions.allowLocalHttp === true };
   let saved = null;
   let replacedExistingSession = false;
+  let previousSessionRevoked = null;
+  let mcp = null;
+  const installMcp = options.installMcp || installHostedMcp;
+  const installationOptions = {
+    version: BRIDGE_VERSION,
+    client: tool,
+    workspaceRoot: repository.root,
+    homeDir: options.homeDir || os.homedir(),
+    bridgeHome: options.bridgeHome,
+    runtimeEntry: options.runtimeEntry,
+    allowExternalRuntime: options.allowExternalRuntime,
+    npmExecPath: options.npmExecPath,
+    nodePath: options.nodePath || process.execPath,
+    runProcess: options.runProcess
+  };
+  let previousInstallation = null;
   try {
-    const adapter = installHostedAdapter(tool, options.homeDir || os.homedir());
+    previousInstallation = loadInstallation({
+      homeDir: installationOptions.homeDir,
+      bridgeHome: installationOptions.bridgeHome
+    });
+    const link = await callHostedProjectLink({ projectId: exchange.project_id, session, fetchImpl: activeFetch });
+    const firstInstructionRaw = await callHostedCommand({ command: "next", payload: { project_id: exchange.project_id }, session, fetchImpl: activeFetch });
+    mcp = installMcp(installationOptions);
+    saved = saveSession(sessionRecord, sessionToken, sessionOptions);
     if (existingSession) {
       try {
         await callHostedSessionRevoke({
@@ -2275,42 +1974,71 @@ async function connectWithSetupIntent(argv = [], options = {}) {
           session: existingSession,
           fetchImpl: activeFetch
         });
-      } catch (error) {
-        if (!(error instanceof BridgeServerError) || error.code !== "bridge_session_revoke_failed") {
-          throw error;
-        }
+        previousSessionRevoked = true;
+      } catch {
+        previousSessionRevoked = false;
       }
-      clearSession(sessionOptions);
       replacedExistingSession = true;
     }
-    saved = saveSession(sessionRecord, sessionToken, sessionOptions);
-    const link = await callHostedProjectLink({ projectId: exchange.project_id, session, fetchImpl: activeFetch });
-    const firstInstructionRaw = await callHostedCommand({ command: "next", payload: { project_id: exchange.project_id }, session, fetchImpl: activeFetch });
-    const firstInstruction = presentHostedResult(firstInstructionRaw);
+    let retiredAdapters = [];
+    try { retiredAdapters = retireHostedAdapters(options.homeDir || os.homedir()); } catch {}
+    const firstNextAction = firstInstructionRaw?.next_action && typeof firstInstructionRaw.next_action === "object"
+      ? {
+          code: firstInstructionRaw.next_action.code || null,
+          message: firstInstructionRaw.next_action.message || null
+        }
+      : null;
     return {
       ok: true,
       linked: true,
       status: "connected",
       existing_session_detected: Boolean(existingSession),
       replaced_existing_session: replacedExistingSession,
-      message: "Hosted Unclog is connected. Continue with the hosted instruction below.",
+      previous_session_revoked: previousSessionRevoked,
+      message: mcp.nextStep,
       project: link.project,
       device: link.device,
-      adapter,
+      mcp,
+      retired_adapters: retiredAdapters,
       storage: {
         path: saved.path,
         secretStore: saved.credentialStorage,
         sessionMetadataContainsSecret: false,
         persistedSecretMaterial: saved.credentialStorage === "permission-protected file"
       },
-      next_action: firstInstruction.next_action,
-      commands_now: firstInstruction.commands_now || [],
-      agent_instruction: firstInstruction.agent_instruction,
-      hosted_instruction: firstInstruction
+      first_hosted_state: {
+        next_action: firstNextAction,
+        mission_id: firstInstructionRaw.mission_id || null
+      },
+      next_step: mcp.nextStep,
+      shell_commands_required_after_setup: false
     };
   } catch (error) {
     try { await callHostedSessionRevoke({ projectId: exchange.project_id, session, fetchImpl: activeFetch }); } catch {}
-    if (saved) clearSession(sessionOptions);
+    if (saved) {
+      clearSession(sessionOptions);
+      if (existingSession?.sessionToken) {
+        try { saveSession(existingSession, existingSession.sessionToken, sessionOptions); } catch {}
+      }
+    }
+    if (mcp) {
+      try {
+        if (previousInstallation) {
+          installMcp({
+            version: previousInstallation.packageVersion,
+            client: previousInstallation.client,
+            workspaceRoot: previousInstallation.workspaceRoot,
+            homeDir: installationOptions.homeDir,
+            bridgeHome: installationOptions.bridgeHome,
+            runtimeEntry: previousInstallation.runtimeEntry,
+            allowExternalRuntime: true,
+            nodePath: previousInstallation.nodePath
+          });
+        } else {
+          uninstallHostedMcp({ homeDir: installationOptions.homeDir, bridgeHome: installationOptions.bridgeHome });
+        }
+      } catch {}
+    }
     throw error;
   }
 }
@@ -2635,7 +2363,6 @@ function createBridgeClient(options = {}) {
   const fetchImpl = options.fetchImpl;
   return {
     blockedState,
-    adapterPrompt: buildAdapterPrompt,
     commandStatus: hostedCommandStatus,
     responseContract: hostedResponseContract,
     supportedCommands: () => [...HOSTED_COMMAND_CONTRACTS].sort(),
@@ -2660,19 +2387,15 @@ async function main(argv = process.argv.slice(2)) {
   const command = argv[0];
   if (!command || command === "help" || command === "--help") {
     console.log(JSON.stringify({
-      usage: "unclog-bridge connect|follow|status|doctor|logout|revoke|<hosted-command>",
-      connect: `npx --yes unclog-bridge@${BRIDGE_VERSION} connect --tool codex|claude --setup-intent <intent>`,
-      resume: `npx --yes unclog-bridge@${BRIDGE_VERSION} follow`,
-      examples: [
-        `npx --yes unclog-bridge@${BRIDGE_VERSION} drafts list`,
-        `npx --yes unclog-bridge@${BRIDGE_VERSION} goals template --draft`,
-        `npx --yes unclog-bridge@${BRIDGE_VERSION} <hosted command> --raw`
-      ],
-      output: "Default output is a compact cold-agent view with server guidance and executable thin-bridge commands. Add --raw only for complete diagnostics."
+      usage: "unclog-bridge connect|mcp|doctor|reconnect|update|uninstall|logout|revoke",
+      connect: `npx --yes unclog-bridge@${BRIDGE_VERSION} connect --tool codex|claude|cursor|generic --setup-intent <intent>`,
+      routine_workflow: "Use the installed unclog_next, unclog_act, and unclog_wait MCP tools. No npx or shell command is required after setup.",
+      recovery: ["doctor", "reconnect --setup-intent <intent>", "update", "uninstall", "logout"],
+      private_local_cli_allowed: false
     }, null, 2));
     return 0;
   }
-  if (command === "connect") {
+  if (command === "connect" || command === "reconnect") {
     try {
       console.log(JSON.stringify(await connectWithSetupIntent(argv.slice(1), {
         onStatus(status) {
@@ -2686,25 +2409,71 @@ async function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
+  if (command === "mcp") {
+    try {
+      const flags = parseFlagArgs(argv.slice(1));
+      const installation = loadInstallation();
+      const workspaceRoot = flags.workspace || installation?.workspaceRoot || process.cwd();
+      const { startMcpServer } = require("./mcp");
+      await startMcpServer(module.exports, { workspaceRoot, version: BRIDGE_VERSION });
+      return null;
+    } catch (error) {
+      console.error(JSON.stringify({ ok: false, code: error.code || "mcp_start_failed", message: error.message }, null, 2));
+      return 1;
+    }
+  }
+  if (command === "update") {
+    try {
+      const current = loadInstallation();
+      const session = loadSession();
+      if (!current || !session) throw new BridgeServerError("not_connected", "Hosted Unclog is not connected.", blockedState("not_connected"));
+      const result = installHostedMcp({
+        version: BRIDGE_VERSION,
+        client: session.tool || current.client,
+        workspaceRoot: current.workspaceRoot,
+        nodePath: process.execPath
+      });
+      retireHostedAdapters();
+      console.log(JSON.stringify({ ok: true, updated: true, mcp: result }, null, 2));
+      return 0;
+    } catch (error) {
+      console.error(JSON.stringify(error.publicState || { ok: false, code: error.code || "update_failed", message: error.message }, null, 2));
+      return 1;
+    }
+  }
+  if (command === "uninstall") {
+    try {
+      let revoked = false;
+      let hostedRevocationPending = false;
+      try {
+        if (loadSession()) {
+          await logout();
+          revoked = true;
+        }
+      } catch {
+        hostedRevocationPending = true;
+        clearSession();
+      }
+      const result = uninstallHostedMcp();
+      console.log(JSON.stringify({
+        ok: true,
+        revoked,
+        hosted_revocation_pending: hostedRevocationPending,
+        recovery: hostedRevocationPending ? "Revoke the disconnected device from the hosted Unclog dashboard when online." : null,
+        ...result
+      }, null, 2));
+      return 0;
+    } catch (error) {
+      console.error(JSON.stringify(error.publicState || { ok: false, code: error.code || "uninstall_failed", message: error.message }, null, 2));
+      return 1;
+    }
+  }
   if (command === "logout" || command === "revoke") {
     try {
       console.log(JSON.stringify(await logout(), null, 2));
       return 0;
     } catch (error) {
       const publicState = error.publicState || blockedState("logout_failed");
-      console.error(JSON.stringify(publicState, null, 2));
-      return 1;
-    }
-  }
-  if (command === "link" || command === "status") {
-    try {
-      const flags = parseFlagArgs(argv.slice(1));
-      const positionalProject = argv.slice(1).find((arg) => !String(arg).startsWith("--"));
-      const result = await createBridgeClient().linkProject(flags.project || positionalProject);
-      console.log(JSON.stringify(result, null, 2));
-      return 0;
-    } catch (error) {
-      const publicState = error.publicState || blockedState("error");
       console.error(JSON.stringify(publicState, null, 2));
       return 1;
     }
@@ -2722,7 +2491,8 @@ async function main(argv = process.argv.slice(2)) {
         credentialStorageUsable: storageCapabilities.usable,
         connected: Boolean(session),
         projectId: session ? session.projectId : null,
-        storage: sessionStorageContract()
+        storage: sessionStorageContract(),
+        mcp: installationDoctor()
       }, null, 2));
       return 0;
     } catch (error) {
@@ -2730,40 +2500,18 @@ async function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
-  try {
-    reconcilePendingLocalArtifactEffects();
-    const rawOutput = argv.includes("--raw") || argv.includes("--debug");
-    const parsed = command === "follow"
-      ? parseHostedCommandArgv(argv.length > 1 ? argv.slice(1) : ["next"])
-      : parseHostedCommandArgv(argv);
-    const activeSession = loadSession();
-    const adapterRefresh = activeSession?.tool
-      ? installHostedAdapter(activeSession.tool)
-      : null;
-    const result = await createBridgeClient({ session: activeSession }).command(parsed.command, parsed.payload);
-    const localArtifacts = applyHostedLocalArtifactEffects(result);
-    const localOutput = parsed.localOutputPath
-      ? writeHostedOutputFile(parsed.localOutputPath, result)
-      : null;
-    const presented = presentHostedResult(result, { raw: rawOutput, cwd: process.cwd() });
-    console.log(JSON.stringify(composeHostedCliOutput(presented, {
-      localOutput,
-      localArtifacts,
-      adapterRefresh
-    }), null, 2));
-    return 0;
-  } catch (error) {
-    const publicState = error.publicState || blockedState("error");
-    console.error(JSON.stringify(publicState, null, 2));
-    return 1;
-  }
-}
-
-if (require.main === module) {
-  main().then((code) => process.exit(code));
+  console.error(JSON.stringify({
+    ok: false,
+    blocked: true,
+    code: "routine_cli_retired",
+    message: "Routine hosted Unclog work now uses the installed MCP tools, not repeated shell commands.",
+    recovery: ["Call unclog_next in your client.", "Run unclog-bridge doctor only if the MCP tools are missing."]
+  }, null, 2));
+  return 1;
 }
 
 module.exports = {
+  BRIDGE_VERSION,
   BridgeServerError,
   HOSTED_COMMAND_CONTRACTS,
   HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
@@ -2775,25 +2523,29 @@ module.exports = {
   assertHostedProjectLinkEnvelope,
   assertHostedResponseEnvelope,
   blockedState,
-  buildAdapterPrompt,
   callHostedCommand,
   callHostedProjectLink,
   callHostedSessionRevoke,
   connectWithSetupIntent,
-  composeHostedCliOutput,
   createBridgeClient,
   hostedCommandStatus,
   hostedResponseContract,
-  installHostedAdapter,
+  installHostedMcp,
+  installationDoctor,
   logout,
   main,
   normalizeHostedCommand,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
-  presentHostedResult,
   reconcilePendingLocalArtifactEffects,
-  renderCanonicalHostedCommand,
-  renderHostedGuidance,
+  retireHostedAdapters,
   repositoryIdentity,
+  uninstallHostedMcp,
   writeHostedOutputFile
 };
+
+if (require.main === module) {
+  main().then((code) => {
+    if (Number.isInteger(code)) process.exitCode = code;
+  });
+}

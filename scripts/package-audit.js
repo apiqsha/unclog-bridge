@@ -18,8 +18,14 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.12") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.0") {
   throw new Error("Public package identity must remain explicit and version pinned.");
+}
+if (manifest.dependencies?.["@modelcontextprotocol/sdk"] !== "1.29.0" || manifest.dependencies?.zod !== "3.25.76") {
+  throw new Error("Persistent MCP runtime dependencies must remain exact and production pinned.");
+}
+if (JSON.stringify(manifest.files) !== JSON.stringify(["src", "README.md", "LICENSE"])) {
+  throw new Error("The published package file boundary changed.");
 }
 if (manifest.license !== "SEE LICENSE IN LICENSE" || !fs.existsSync(path.join(root, "LICENSE"))) {
   throw new Error("Customer usage terms must be explicit in the packaged LICENSE file.");
@@ -41,6 +47,36 @@ for (const contract of [
 }
 if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes("github.event_name == 'release'")) {
   throw new Error("Release workflow must separate first-publish token bootstrap from trusted publishing.");
+}
+
+const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+for (const required of [
+  "unclog-bridge@1.1.0 connect",
+  "Unclog connected. Start a new task and say: Use Unclog.",
+  "unclog_next",
+  "unclog_act",
+  "unclog_wait",
+  ".unclog-drafts",
+  "Customers do not need an npm account"
+]) {
+  if (!readme.includes(required)) throw new Error(`README is missing current customer contract: ${required}`);
+}
+if (/unclog-bridge@1\.0\.|\bfollow\b/.test(readme)) throw new Error("README contains retired routine CLI guidance.");
+
+const mcpSource = fs.readFileSync(path.join(root, "src", "mcp.js"), "utf8");
+const registeredTools = [...mcpSource.matchAll(/registerTool\("([^"]+)"/g)].map((match) => match[1]);
+if (JSON.stringify(registeredTools) !== JSON.stringify(["unclog_next", "unclog_act", "unclog_wait"])) {
+  throw new Error(`Public MCP surface must contain exactly three tools: ${registeredTools.join(", ")}`);
+}
+for (const required of ["mcp_action_stale", "mcp_wrong_mission", "mcp_wrong_actor", "mcp_action_input_required", "shell_commands_allowed: false"]) {
+  if (!mcpSource.includes(required)) throw new Error(`Missing MCP fail-closed contract: ${required}`);
+}
+const installerSource = fs.readFileSync(path.join(root, "src", "install.js"), "utf8");
+for (const required of ["client_config_conflict", "installation.json", "runtime_identity_mismatch", "Unclog connected. Start a new task and say: Use Unclog."]) {
+  if (!installerSource.includes(required)) throw new Error(`Missing persistent installer contract: ${required}`);
+}
+for (const retired of ["presentHostedResult", "renderCanonicalHostedCommand", "composeHostedCliOutput", 'command === "follow"']) {
+  if (source.includes(retired)) throw new Error(`Retired repeated-command surface remains public: ${retired}`);
 }
 
 process.stdout.write("package audit passed\n");
