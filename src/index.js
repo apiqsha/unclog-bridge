@@ -1873,6 +1873,20 @@ const MANAGER_MONITOR_REDUNDANT_KEYS = [
   "agents",
   "agent_progress",
   "constraints",
+  "watchdog_mode",
+  "official_health_checker",
+  "routine_check",
+  "ai_invocations",
+  "device_pings",
+  "now",
+  "interval_minutes",
+  "stale_after_minutes",
+  "state_store",
+  "next_watch_at",
+  "main_validation_required",
+  "nudge_stale",
+  "cooldown_minutes",
+  "max_nudges",
   "local_artifacts",
   "adapter_refresh"
 ];
@@ -1887,6 +1901,23 @@ function compactManagerMonitoring(result) {
   if (Array.isArray(compact.required_fields) && compact.required_fields.length === 0) delete compact.required_fields;
   if (compact.field_guide && typeof compact.field_guide === "object" && Object.keys(compact.field_guide).length === 0) {
     delete compact.field_guide;
+  }
+  if (compact.agent_instruction && typeof compact.agent_instruction === "object") {
+    const instruction = compact.agent_instruction;
+    compact.agent_instruction = {
+      schema: instruction.schema,
+      instruction_id: instruction.instruction_id,
+      phase: instruction.phase,
+      next_action_code: instruction.next_action_code,
+      authority: instruction.authority,
+      guidance_sha256: instruction.guidance_sha256,
+      canonical_guidance_sha256: instruction.canonical_guidance_sha256,
+      transport: instruction.transport,
+      guidance_delivery: "Routine manager monitoring omits repeated full phase guidance. Follow next_action and commands_now; the next non-monitor response carries the complete live guidance."
+    };
+    compact.agent_instruction = Object.fromEntries(
+      Object.entries(compact.agent_instruction).filter(([, value]) => value !== undefined)
+    );
   }
   compact.output_view = {
     mode: watchShape ? "compact_manager_watch" : "compact_manager_monitor",
@@ -1903,7 +1934,7 @@ function compactManagerMonitoring(result) {
       "do_not",
       "agent_instruction"
     ].filter((key) => Object.hasOwn(compact, key)),
-    full_diagnostics: "Re-run the same command with --raw only when the compact view lacks required diagnostic context."
+    full_diagnostics: "Use --raw only for human diagnostics when this view lacks required context; never execute canonical bare unclog commands from raw output."
   };
   return compact;
 }
@@ -1945,7 +1976,7 @@ function presentHostedResult(result, options = {}) {
 function installHostedAdapter(tool, homeDir = os.homedir()) {
   const marker = "<!-- unclog-hosted-adapter-v2 -->";
   const ownedMarkers = [marker, "<!-- unclog-hosted-adapter-v1 -->"];
-  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nThis is a bootstrap only. Use the published \`unclog-bridge\` thin CLI; never use or install a private/local Unclog CLI and never edit \`.unclog\`. Only the active intake file under \`.unclog-drafts\` may be edited locally.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\`. Treat \`agent_instruction.guidance_markdown\` as the live phase skill selected by hosted Unclog, and execute only the bridge-rendered \`commands_now\`. Continue an existing \`local_draft.file\` instead of creating a duplicate. The server owns workflow state and the bridge owns transport. Do not guess the next workflow command or reconstruct the workflow locally. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
+  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nThis is a bootstrap only. Use the published \`unclog-bridge\` thin CLI; never use or install a private/local Unclog CLI and never edit \`.unclog\`. Only the active intake file under \`.unclog-drafts\` may be edited locally.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\`. When present, treat \`agent_instruction.guidance_markdown\` as the live phase skill selected by hosted Unclog. Routine manager status/watch may instead return a compact \`guidance_delivery\` identity; in that case \`next_action\`, \`commands_now\`, and \`do_not\` are sufficient. Execute only the bridge-rendered \`commands_now\`. Continue an existing \`local_draft.file\` instead of creating a duplicate. The server owns workflow state and the bridge owns transport. Do not guess the next workflow command or reconstruct the workflow locally. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
   const relative = tool === "claude"
     ? path.join(".claude", "skills", "unclog-hosted", "SKILL.md")
     : path.join(".agents", "skills", "unclog-hosted", "SKILL.md");
