@@ -7,6 +7,7 @@ const test = require("node:test");
 
 const {
   BridgeServerError,
+  DEFAULT_APPROVAL_FALLBACK_DELAY_MS,
   HOSTED_COMMAND_CONTRACTS,
   HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
   HOSTED_REMOVED_COMMAND_CONTRACTS,
@@ -32,6 +33,10 @@ const {
   repositoryIdentity,
   writeHostedOutputFile
 } = require("../src/index");
+
+test("dashboard discovery gets a human review window before approval fallback opens", () => {
+  assert.equal(DEFAULT_APPROVAL_FALLBACK_DELAY_MS, 30_000);
+});
 const {
   SessionStorageError,
   clearSession,
@@ -64,7 +69,7 @@ function fakeMcpInstall(options = {}) {
     persistent: true,
     serverName: "unclog",
     client: options.client,
-    packageVersion: "1.1.0",
+    packageVersion: "1.1.1",
     runtimeReused: false,
     configPath: path.join(options.homeDir, ".codex", "config.toml"),
     workspaceRoot: options.workspaceRoot,

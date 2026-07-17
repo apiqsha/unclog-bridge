@@ -7,10 +7,12 @@ The official persistent thin MCP bridge for hosted Unclog. It handles one-time c
 Copy the exact prompt from the signed-in Unclog dashboard and give it to your coding agent inside the target Git repository. Its one-time command has this shape:
 
 ```sh
-npx --yes unclog-bridge@1.1.0 connect --tool codex --setup-intent <short-lived-intent>
+npx --yes unclog-bridge@1.1.1 connect --tool codex --setup-intent <short-lived-intent>
 ```
 
-`--tool` may be `codex`, `claude`, `cursor`, or `generic`. The bridge resolves the repository root, waits for approval in the already signed-in dashboard, links the repository, installs the exact public runtime under `~/.unclog/bridge/runtime/1.1.0`, and registers an `unclog` local stdio MCP server without replacing unrelated client settings. Customers do not need an npm account and do not copy or type a device code.
+`--tool` may be `codex`, `claude`, `cursor`, or `generic`. The bridge resolves the repository root, waits for approval in the already signed-in dashboard, links the repository, installs the exact public runtime under `~/.unclog/bridge/runtime/1.1.1`, and registers an `unclog` local stdio MCP server without replacing unrelated client settings. Customers do not need an npm account and do not copy or type a device code.
+
+The already-open dashboard is the primary approval surface. The bridge gives the customer 30 seconds to review the automatically detected request before it opens the one-time approval URL as a recovery fallback; successful normal approval never opens the extra fallback tab.
 
 After a normal Codex, Claude, or Cursor setup, the only continuation message is:
 
@@ -42,7 +44,7 @@ CLI commands are reserved for setup and recovery:
 - `uninstall` removes only bridge-owned local configuration/runtime and attempts hosted device revocation.
 - `logout` or `revoke` revokes the hosted device while leaving the installed MCP registration available for a later reconnect.
 
-If recovery is needed, invoke the exact pinned release shown by the dashboard, for example `npx --yes unclog-bridge@1.1.0 doctor`. Unknown routine CLI commands fail closed and direct the agent back to `unclog_next`.
+If recovery is needed, invoke the exact pinned release shown by the dashboard, for example `npx --yes unclog-bridge@1.1.1 doctor`. Unknown routine CLI commands fail closed and direct the agent back to `unclog_next`.
 
 ## Public-package boundary
 

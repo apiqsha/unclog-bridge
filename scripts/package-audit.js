@@ -18,7 +18,7 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.0") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.1") {
   throw new Error("Public package identity must remain explicit and version pinned.");
 }
 if (manifest.dependencies?.["@modelcontextprotocol/sdk"] !== "1.29.0" || manifest.dependencies?.zod !== "3.25.76") {
@@ -51,13 +51,14 @@ if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes(
 
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 for (const required of [
-  "unclog-bridge@1.1.0 connect",
+  "unclog-bridge@1.1.1 connect",
   "Unclog connected. Start a new task and say: Use Unclog.",
   "unclog_next",
   "unclog_act",
   "unclog_wait",
   ".unclog-drafts",
-  "Customers do not need an npm account"
+  "Customers do not need an npm account",
+  "30 seconds"
 ]) {
   if (!readme.includes(required)) throw new Error(`README is missing current customer contract: ${required}`);
 }
@@ -77,6 +78,9 @@ for (const required of ["client_config_conflict", "installation.json", "runtime_
 }
 for (const retired of ["presentHostedResult", "renderCanonicalHostedCommand", "composeHostedCliOutput", 'command === "follow"']) {
   if (source.includes(retired)) throw new Error(`Retired repeated-command surface remains public: ${retired}`);
+}
+if (!source.includes("DEFAULT_APPROVAL_FALLBACK_DELAY_MS = 30_000")) {
+  throw new Error("Normal dashboard approval must receive a 30-second review window before fallback opens.");
 }
 
 process.stdout.write("package audit passed\n");

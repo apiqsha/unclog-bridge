@@ -233,7 +233,7 @@ test("official MCP SDK client sees exactly three tools and server instructions",
       return envelope(command, { commands_now: [] });
     }
   };
-  const { server } = createMcpServer(bridge, { workspaceRoot: root, client: fakeClient, version: "1.1.0" });
+  const { server } = createMcpServer(bridge, { workspaceRoot: root, client: fakeClient, version: "1.1.1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const sdkClient = new Client({ name: "unclog-contract-test", version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), sdkClient.connect(clientTransport)]);

@@ -31,6 +31,7 @@ const SESSION_REVOKE_ENDPOINT = "/v1/bridge/session/revoke";
 const DEVICE_AUTHORIZE_ENDPOINT = "/v1/bridge/device/authorize";
 const DEVICE_TOKEN_ENDPOINT = "/v1/bridge/device/token";
 const BRIDGE_VERSION = require("../package.json").version;
+const DEFAULT_APPROVAL_FALLBACK_DELAY_MS = 30_000;
 const MAX_LOCAL_OUTPUT_BYTES = 1024 * 1024;
 const LOCAL_ARTIFACT_SCHEMA = "unclog-local-artifacts/1";
 const LOCAL_ARTIFACT_EFFECTS_SCHEMA = "unclog-local-artifact-effects/1";
@@ -1847,7 +1848,7 @@ async function connectWithSetupIntent(argv = [], options = {}) {
   const sessionToken = newSessionToken();
   const deadline = Date.parse(authorization.expires_at || "") || Date.now() + 10 * 60 * 1000;
   let intervalMs = Math.max(250, Number(options.pollIntervalMs || authorization.interval * 1000 || 2000));
-  const fallbackDelayMs = Math.max(0, Number(options.fallbackDelayMs ?? 8000));
+  const fallbackDelayMs = Math.max(0, Number(options.fallbackDelayMs ?? DEFAULT_APPROVAL_FALLBACK_DELAY_MS));
   const pollRetryBaseMs = Math.max(1, Number(options.pollRetryBaseMs ?? 1000));
   const fallbackAt = Date.now() + fallbackDelayMs;
   let fallbackShown = false;
@@ -2512,6 +2513,7 @@ async function main(argv = process.argv.slice(2)) {
 
 module.exports = {
   BRIDGE_VERSION,
+  DEFAULT_APPROVAL_FALLBACK_DELAY_MS,
   BridgeServerError,
   HOSTED_COMMAND_CONTRACTS,
   HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
