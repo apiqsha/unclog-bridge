@@ -1014,11 +1014,11 @@ test("adapter prompt is minimal and useless without server auth", async () => {
 test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
   assert.equal(
     renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
-    "npx --yes unclog-bridge@1.0.6 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
+    "npx --yes unclog-bridge@1.0.7 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
   );
   const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.6 drafts list/);
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.6 goals template --draft/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.7 drafts list/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.7 goals template --draft/);
   assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
   assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
   assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
@@ -1047,7 +1047,7 @@ test("default customer presentation is compact, executable, and keeps raw diagno
     }
   });
   const compact = presentHostedResult(hosted);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.6 drafts list");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.7 drafts list");
   assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
   assert.equal(compact.next_action.command, compact.commands_now[0]);
   assert.equal(compact.drafts.length, 1);
@@ -1055,13 +1055,13 @@ test("default customer presentation is compact, executable, and keeps raw diagno
   assert.equal(compact.draft_summary.submitted_history_count, 1);
   assert.equal(compact.domain, undefined);
   assert.equal(compact.source, undefined);
-  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.6 drafts list/);
+  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.7 drafts list/);
   assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
-  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.6");
+  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.7");
 
   const raw = presentHostedResult(hosted, { raw: true });
   assert.equal(raw.commands_now[0], "unclog --json drafts list");
-  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.6 drafts list");
+  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.7 drafts list");
   assert.equal(raw.drafts.length, 2);
   assert.deepEqual(raw.domain, { response: { duplicated: true } });
 });
@@ -1114,6 +1114,59 @@ test("default draft presentation adds bounded local context without changing the
   const raw = presentHostedResult(hosted, { raw: true, cwd: repository });
   assert.equal(raw.drafts[0].local_preview, undefined);
   assert.equal(raw.drafts[0].first_big_goal, undefined);
+});
+
+test("manager monitoring keeps actionable guidance while duplicate state projections remain raw-only", () => {
+  const hosted = hostedOk("agents.status", {
+    project: { id: "unclog", projectVersion: 20 },
+    manager_monitoring_guidance: {
+      watch_command: "unclog --mission M001 --json agents watch",
+      counts: { active: 1, pending: 0, blocked: 0, stale: 0, needs_attention: 0, done: 0 }
+    },
+    worker_monitor_signals: [{ agent_id: "sub-1", status: "active", worker_next_code: "SUBMIT_ACTION_PLAN" }],
+    worker_status_counts: { total: 1, active: 1, pending: 0, blocked: 0, stale: 0, needs_attention: 0, done: 0 },
+    active_worker_count: 1,
+    pending_worker_count: 0,
+    agent_assignment: { agents: [{ id: "sub-1", assigned_goal_ids: ["G001"] }] },
+    agent_status_counts: { total: 2, active: 2 },
+    agents: [{ id: "sub-1", status: "active", roots: [{ goal_id: "G001" }] }],
+    agent_progress: { agents: [{ id: "sub-1", status: "active" }] },
+    constraints: [{ id: "correctness_first" }],
+    manager_live_notes: { total: 1, open: 1, open_notes: [{ id: "N001" }] },
+    do_not: ["Do not impersonate a worker."],
+    commands_now: ["unclog --mission M001 --json agents watch"],
+    required_fields: [],
+    field_guide: {},
+    local_artifacts: { applied: 0 },
+    adapter_refresh: { customerSafe: true },
+    agent_instruction: {
+      guidance_sha256: "server-hash",
+      guidance_markdown: "Full live hosted phase guidance remains available.",
+      transport: { canonical_command_notation_only: true }
+    }
+  });
+
+  const compact = presentHostedResult(hosted);
+  assert.equal(compact.output_view.mode, "compact_manager_monitor");
+  assert.equal(compact.agent_assignment, undefined);
+  assert.equal(compact.agents, undefined);
+  assert.equal(compact.agent_progress, undefined);
+  assert.equal(compact.constraints, undefined);
+  assert.equal(compact.active_worker_count, undefined);
+  assert.equal(compact.required_fields, undefined);
+  assert.equal(compact.field_guide, undefined);
+  assert.deepEqual(compact.worker_status_counts, hosted.worker_status_counts);
+  assert.deepEqual(compact.worker_monitor_signals, hosted.worker_monitor_signals);
+  assert.deepEqual(compact.manager_live_notes, hosted.manager_live_notes);
+  assert.equal(compact.agent_instruction.guidance_markdown, "Full live hosted phase guidance remains available.");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.7 --mission M001 agents watch");
+
+  const raw = presentHostedResult(hosted, { raw: true });
+  assert.deepEqual(raw.agent_assignment, hosted.agent_assignment);
+  assert.deepEqual(raw.agents, hosted.agents);
+  assert.deepEqual(raw.agent_progress, hosted.agent_progress);
+  assert.deepEqual(raw.constraints, hosted.constraints);
+  assert.deepEqual(raw.local_artifacts, hosted.local_artifacts);
 });
 
 test("raw and debug presentation flags never enter the hosted workflow payload", () => {

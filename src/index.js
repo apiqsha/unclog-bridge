@@ -1846,6 +1846,63 @@ function compactDraftListing(result, options = {}) {
   };
 }
 
+const MANAGER_MONITOR_REDUNDANT_KEYS = [
+  "billing",
+  "contract",
+  "device",
+  "command_state",
+  "capsule",
+  "active_worker_count",
+  "pending_worker_count",
+  "blocked_worker_count",
+  "stale_worker_count",
+  "needs_attention_worker_count",
+  "done_worker_count",
+  "agent_assignment",
+  "assignment_ready",
+  "assignment_needs_replan",
+  "mode",
+  "agent_count",
+  "agent_status_counts",
+  "active_agent_count",
+  "completed_agent_count",
+  "blocked_agent_count",
+  "stale_agent_count",
+  "needs_attention_agent_count",
+  "pending_agent_count",
+  "agents",
+  "agent_progress",
+  "constraints",
+  "local_artifacts",
+  "adapter_refresh"
+];
+
+function compactManagerMonitoring(result) {
+  if (!result || !["agents.status", "agents.watch"].includes(result.command)) return result;
+  if (!result.manager_monitoring_guidance || !result.worker_status_counts) return result;
+  const compact = { ...result };
+  for (const key of MANAGER_MONITOR_REDUNDANT_KEYS) delete compact[key];
+  if (Array.isArray(compact.required_fields) && compact.required_fields.length === 0) delete compact.required_fields;
+  if (compact.field_guide && typeof compact.field_guide === "object" && Object.keys(compact.field_guide).length === 0) {
+    delete compact.field_guide;
+  }
+  compact.output_view = {
+    mode: "compact_manager_monitor",
+    preserved: [
+      "next_action",
+      "commands_now",
+      "manager_monitoring_guidance",
+      "worker_monitor_signals",
+      "worker_status_counts",
+      "manager_live_notes",
+      "do_not",
+      "agent_instruction"
+    ],
+    full_diagnostics: "Re-run the same command with --raw only when the compact view lacks required diagnostic context."
+  };
+  return compact;
+}
+
 function presentHostedResult(result, options = {}) {
   const raw = options.raw === true;
   const canonical = JSON.parse(JSON.stringify(result || {}));
@@ -1876,6 +1933,7 @@ function presentHostedResult(result, options = {}) {
     delete rendered[key];
   }
   rendered = compactDraftListing(rendered, options);
+  rendered = compactManagerMonitoring(rendered);
   return rendered;
 }
 
