@@ -1873,6 +1873,8 @@ const MANAGER_MONITOR_REDUNDANT_KEYS = [
   "agents",
   "agent_progress",
   "constraints",
+  "next",
+  "bridge_commands_now",
   "watchdog_mode",
   "official_health_checker",
   "routine_check",
@@ -1919,6 +1921,26 @@ function compactManagerMonitoring(result) {
       Object.entries(compact.agent_instruction).filter(([, value]) => value !== undefined)
     );
   }
+  if (watchShape) {
+    const rowKeys = [
+      "agent_id",
+      "status",
+      "reason",
+      "progress_status",
+      "age_minutes",
+      "stale_after_minutes",
+      "nudge_count",
+      "handoff_status",
+      "handoff_issued_at",
+      "handoff_acknowledged_at",
+      "handoff_command"
+    ];
+    compact.rows = compact.rows.map((row) => Object.fromEntries(
+      rowKeys
+        .filter((key) => Object.hasOwn(row, key))
+        .map((key) => [key, row[key]])
+    ));
+  }
   compact.output_view = {
     mode: watchShape ? "compact_manager_watch" : "compact_manager_monitor",
     preserved: [
@@ -1937,6 +1959,17 @@ function compactManagerMonitoring(result) {
     full_diagnostics: "Use --raw only for human diagnostics when this view lacks required context; never execute canonical bare unclog commands from raw output."
   };
   return compact;
+}
+
+function composeHostedCliOutput(presented, options = {}) {
+  const viewMode = String(presented?.output_view?.mode || "");
+  const compactManagerMonitor = ["compact_manager_monitor", "compact_manager_watch"].includes(viewMode);
+  return {
+    ...presented,
+    ...(options.localOutput ? { local_output: options.localOutput } : {}),
+    ...(!compactManagerMonitor && options.localArtifacts ? { local_artifacts: options.localArtifacts } : {}),
+    ...(!compactManagerMonitor && options.adapterRefresh ? { adapter_refresh: options.adapterRefresh } : {})
+  };
 }
 
 function presentHostedResult(result, options = {}) {
@@ -2654,12 +2687,11 @@ async function main(argv = process.argv.slice(2)) {
       ? writeHostedOutputFile(parsed.localOutputPath, result)
       : null;
     const presented = presentHostedResult(result, { raw: rawOutput, cwd: process.cwd() });
-    console.log(JSON.stringify({
-      ...presented,
-      ...(localOutput ? { local_output: localOutput } : {}),
-      ...(localArtifacts ? { local_artifacts: localArtifacts } : {}),
-      ...(adapterRefresh ? { adapter_refresh: adapterRefresh } : {})
-    }, null, 2));
+    console.log(JSON.stringify(composeHostedCliOutput(presented, {
+      localOutput,
+      localArtifacts,
+      adapterRefresh
+    }), null, 2));
     return 0;
   } catch (error) {
     const publicState = error.publicState || blockedState("error");
@@ -2689,6 +2721,7 @@ module.exports = {
   callHostedProjectLink,
   callHostedSessionRevoke,
   connectWithSetupIntent,
+  composeHostedCliOutput,
   createBridgeClient,
   hostedCommandStatus,
   hostedResponseContract,
