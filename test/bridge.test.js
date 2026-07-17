@@ -921,6 +921,11 @@ test("thin bridge materializes hosted goal drafts and carries local draft contex
     assert.equal(listed.payload.local_artifacts.schema, "unclog-local-artifacts/1");
     assert.deepEqual(listed.payload.local_artifacts.entries, [{ path: statusRelative, document: status }]);
 
+    const resumed = parseHostedCommandArgv(["next"], { cwd: root });
+    assert.equal(resumed.command, "next");
+    assert.equal(resumed.payload.local_artifacts.schema, "unclog-local-artifacts/1");
+    assert.deepEqual(resumed.payload.local_artifacts.entries, [{ path: statusRelative, document: status }]);
+
     const lock = parseHostedCommandArgv(["goals", "lock", "--file", draftRelative], { cwd: root });
     assert.equal(lock.command, "goals.lock");
     assert.equal(lock.payload.workflow_file_path, draftRelative);

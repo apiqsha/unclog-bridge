@@ -1626,7 +1626,7 @@ function parseHostedCommandArgv(argv = [], options = {}) {
       const positionals = commandTokens.slice(length);
       const payload = attachPositionals(status.command, flagsToWorkflowPayload(flagTokens), positionals);
       const localOutputPath = attachWorkflowDocuments(status.command, payload, flagTokens, options);
-      if (status.command === "drafts.list") {
+      if (status.command === "drafts.list" || status.command === "next") {
         payload.local_artifacts = collectDraftStatusArtifacts(options);
       }
       attachReviewLifecycle(status.command, payload, flagTokens);
@@ -1744,7 +1744,7 @@ async function postDeviceJson(activeFetch, apiBaseUrl, endpoint, body) {
 
 function installHostedAdapter(tool, homeDir = os.homedir()) {
   const marker = "<!-- unclog-hosted-adapter-v1 -->";
-  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nUse only the published \`unclog-bridge\` thin CLI. Never use a local Unclog development CLI or edit hidden Unclog state.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\` to resume the exact next hosted instruction. Treat hosted JSON fields \`next_action\` and \`commands_now\` as authoritative. Do not guess the next workflow command. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
+  const content = `---\nname: unclog-hosted\ndescription: Use when a repository is connected to hosted Unclog, when the user asks to start, continue, resume, or check Unclog work, or immediately after hosted setup completes. Use only the official thin bridge and follow the server-provided next action.\n---\n\n${marker}\n# Hosted Unclog\n\nUse only the published \`unclog-bridge\` thin CLI. Never use a local Unclog development CLI or edit \`.unclog\` state. Goal-intake files under \`.unclog-drafts\` are the only local editable Unclog workflow artifacts.\n\nRun \`npx --yes unclog-bridge@${BRIDGE_VERSION} follow\` to resume the exact next hosted instruction. Treat hosted JSON fields \`next_action\`, \`commands_now\`, and \`local_draft\` as authoritative. Continue an existing \`local_draft.file\` instead of creating a duplicate. Do not guess the next workflow command. If authentication is missing, ask the user to copy a fresh setup prompt from the hosted dashboard.\n`;
   const relative = tool === "claude"
     ? path.join(".claude", "skills", "unclog-hosted", "SKILL.md")
     : path.join(".agents", "skills", "unclog-hosted", "SKILL.md");
