@@ -1879,7 +1879,9 @@ const MANAGER_MONITOR_REDUNDANT_KEYS = [
 
 function compactManagerMonitoring(result) {
   if (!result || !["agents.status", "agents.watch"].includes(result.command)) return result;
-  if (!result.manager_monitoring_guidance || !result.worker_status_counts) return result;
+  const statusShape = Boolean(result.manager_monitoring_guidance && result.worker_status_counts);
+  const watchShape = result.command === "agents.watch" && Array.isArray(result.rows) && result.counts && typeof result.counts === "object";
+  if (!statusShape && !watchShape) return result;
   const compact = { ...result };
   for (const key of MANAGER_MONITOR_REDUNDANT_KEYS) delete compact[key];
   if (Array.isArray(compact.required_fields) && compact.required_fields.length === 0) delete compact.required_fields;
@@ -1887,17 +1889,20 @@ function compactManagerMonitoring(result) {
     delete compact.field_guide;
   }
   compact.output_view = {
-    mode: "compact_manager_monitor",
+    mode: watchShape ? "compact_manager_watch" : "compact_manager_monitor",
     preserved: [
       "next_action",
       "commands_now",
       "manager_monitoring_guidance",
       "worker_monitor_signals",
       "worker_status_counts",
+      "counts",
+      "rows",
+      "events",
       "manager_live_notes",
       "do_not",
       "agent_instruction"
-    ],
+    ].filter((key) => Object.hasOwn(compact, key)),
     full_diagnostics: "Re-run the same command with --raw only when the compact view lacks required diagnostic context."
   };
   return compact;

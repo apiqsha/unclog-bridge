@@ -18,7 +18,7 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.7") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.0.8") {
   throw new Error("Public package identity must remain explicit and version pinned.");
 }
 if (manifest.license !== "SEE LICENSE IN LICENSE" || !fs.existsSync(path.join(root, "LICENSE"))) {

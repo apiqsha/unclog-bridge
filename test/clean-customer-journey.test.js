@@ -314,7 +314,7 @@ test("packed customer CLI completes and recovers a hosted-only mission, writes o
     assert.equal(connected.status, "connected");
     assert.equal(connected.project.id, "proj_clean");
     assert.equal(connected.agent_instruction.authority, "hosted_unclog_server");
-    assert.match(connected.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.7 next/);
+    assert.match(connected.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.8 next/);
     const bootstrapFile = path.join(homeDir, ".agents", "skills", "unclog-hosted", "SKILL.md");
     assert.equal(fs.existsSync(bootstrapFile), true);
     fs.rmSync(bootstrapFile);

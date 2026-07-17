@@ -7,12 +7,12 @@ The public source and release provenance for this package live at [apiqsha/unclo
 Start from the exact setup prompt shown in the signed-in Unclog dashboard:
 
 ```sh
-npx --yes unclog-bridge@1.0.7 connect --tool codex --setup-intent <short-lived-intent>
+npx --yes unclog-bridge@1.0.8 connect --tool codex --setup-intent <short-lived-intent>
 ```
 
 Run the prompt from anywhere inside the target Git repository. The CLI resolves the Git root, waits for dashboard approval, stores the resulting revocable session in the operating-system credential store, links that repository, and returns the first hosted instruction. On Unix-like systems only, an unavailable keyring may fall back to a verified `0700` directory and `0600` credential file outside the repository; Windows continues to require Credential Manager.
 
-Use `npx --yes unclog-bridge@1.0.7 follow` to resume. Hosted Unclog returns the current optimized phase guidance while this package renders all executable commands through the thin bridge. Default command output is compact; manager status/watch keeps the live guidance, actionable signals, notes and commands while repeated assignment/progress projections remain available through `--raw` only. Active draft listings add only a bounded preview derived inside the customer repository; unconfirmed goal content is not uploaded for listing or resume. Use `status` to check the connection, `doctor` to inspect local prerequisites, and either `logout` or `revoke` to revoke the current device immediately.
+Use `npx --yes unclog-bridge@1.0.8 follow` to resume. Hosted Unclog returns the current optimized phase guidance while this package renders all executable commands through the thin bridge. Default command output is compact; manager status/watch keeps the live guidance, actionable signals, notes and commands while repeated assignment/progress projections remain available through `--raw` only. A worker remains pending until its separate thread fetches the focused packet; an unconfirmed stale handoff routes back to one idempotent prompt reissue instead of an endless monitoring loop. Active draft listings add only a bounded preview derived inside the customer repository; unconfirmed goal content is not uploaded for listing or resume. Use `status` to check the connection, `doctor` to inspect local prerequisites, and either `logout` or `revoke` to revoke the current device immediately.
 
 The setup intent and one-time approval link are short-lived pairing material. Internal device codes travel automatically between the bridge and hosted service; customers do not type or copy a code on the normal path. Never paste a device session token into a prompt or configuration file.
 
