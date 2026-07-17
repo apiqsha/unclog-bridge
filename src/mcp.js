@@ -365,6 +365,19 @@ function createMcpRuntime(bridge, options = {}) {
   const client = options.client || bridge.createBridgeClient({ session: options.session, sessionOptions: options.sessionOptions, fetchImpl: options.fetchImpl });
   const sleep = options.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now || (() => Date.now());
+  const authorityCache = new Map();
+
+  function authorityKey(actorValue = {}) {
+    const actor = actorIdentity(actorValue);
+    return JSON.stringify(actor);
+  }
+
+  function rememberAuthority(current) {
+    authorityCache.set(authorityKey(current.actor), {
+      actor: clone(current.actor),
+      result: clone(current.result)
+    });
+  }
 
   async function fetchCurrent(actorValue = {}) {
     const actor = actorIdentity(actorValue);
@@ -395,6 +408,7 @@ function createMcpRuntime(bridge, options = {}) {
   async function next(input = {}) {
     try {
       const current = await fetchCurrent(input);
+      rememberAuthority(current);
       return publicMcpResult(current.result, current.actor, deps, current.localArtifacts ? { local_artifacts: current.localArtifacts } : {});
     } catch (error) {
       return mcpError(error);
@@ -409,17 +423,32 @@ function createMcpRuntime(bridge, options = {}) {
         error.code = "mcp_action_id_invalid";
         throw error;
       }
+      const previousAuthority = authorityCache.get(authorityKey(input)) || null;
       const current = await fetchCurrent(input);
-      const rawCommands = currentCommands(current.result);
-      const descriptors = actionDescriptors(current.result, current.actor, deps);
-      const index = descriptors.findIndex((descriptor) => descriptor.action_id === requestedActionId);
+      let authority = current;
+      let rawCommands = currentCommands(authority.result);
+      let descriptors = actionDescriptors(authority.result, authority.actor, deps);
+      let index = descriptors.findIndex((descriptor) => descriptor.action_id === requestedActionId);
+      if (index < 0 && previousAuthority) {
+        const cachedDescriptors = actionDescriptors(previousAuthority.result, previousAuthority.actor, deps);
+        const cachedIndex = cachedDescriptors.findIndex((descriptor) => descriptor.action_id === requestedActionId);
+        const cachedDescriptor = cachedIndex >= 0 ? cachedDescriptors[cachedIndex] : null;
+        const sameVersion = projectVersion(previousAuthority.result) === projectVersion(current.result);
+        if (cachedDescriptor?.condition === "after_user_confirms_goals" && cachedDescriptor.requires_user_confirmation === true && sameVersion) {
+          authority = previousAuthority;
+          rawCommands = currentCommands(authority.result);
+          descriptors = cachedDescriptors;
+          index = cachedIndex;
+        }
+      }
       if (index < 0) {
+        rememberAuthority(current);
         const error = new Error("This Unclog action is stale or is not authorized for the current mission and actor.");
         error.code = "mcp_action_stale";
         throw error;
       }
       const descriptor = descriptors[index];
-      const raw = rawCommands.find((candidate) => actionId(candidate, current.result, current.actor) === requestedActionId);
+      const raw = rawCommands.find((candidate) => actionId(candidate, authority.result, authority.actor) === requestedActionId);
       if (!raw) {
         const error = new Error("The current hosted action could not be resolved.");
         error.code = "mcp_action_stale";
@@ -433,12 +462,13 @@ function createMcpRuntime(bridge, options = {}) {
       }
       const allowedInput = [...new Set([...(descriptor.required_input || []), ...Object.keys(descriptor.field_guide || {})])];
       Object.assign(parsed.payload, assertInput(input.input, allowedInput, descriptor.required_input || []));
-      const version = projectVersion(current.result);
+      const version = projectVersion(authority.result);
       if (version !== null) parsed.payload.expected_project_version = version;
       const result = await client.command(parsed.command, parsed.payload);
       const localArtifacts = bridge.applyHostedLocalArtifactEffects(result, { cwd: workspaceRoot });
       const localOutput = parsed.localOutputPath ? bridge.writeHostedOutputFile(parsed.localOutputPath, result, { cwd: workspaceRoot }) : null;
-      return publicMcpResult(result, current.actor, deps, {
+      rememberAuthority({ actor: authority.actor, result });
+      return publicMcpResult(result, authority.actor, deps, {
         executed_action_id: requestedActionId,
         ...(localArtifacts ? { local_artifacts: localArtifacts } : {}),
         ...(localOutput ? { local_output: localOutput } : {})

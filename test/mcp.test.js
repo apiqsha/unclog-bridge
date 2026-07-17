@@ -126,6 +126,66 @@ test("confirmed local intake exposes a typed mission-create action without leaki
   assert.equal(mutation.payload.title, "Disposable capacity planner");
 });
 
+test("confirmed mission-create authority survives a stateless next refresh at the same project version", async () => {
+  const root = repository();
+  const draftId = "D20260718-035800-c0ffee";
+  const file = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+  fs.writeFileSync(path.join(root, file), JSON.stringify({ goals: [] }));
+  let version = 0;
+  const mutations = [];
+  const intakeEnvelope = () => envelope("next", {
+    mission_id: "",
+    project: { id: "project-1", projectVersion: version },
+    next_action: { code: "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT", message: "Lint the confirmed local draft." },
+    commands_now: [`unclog --json goals lint --file "${file}"`]
+  });
+  const confirmationEnvelope = () => envelope("goals.lint", {
+    mission_id: "",
+    project: { id: "project-1", projectVersion: version },
+    valid: true,
+    next_action: {
+      code: "GOAL_INTAKE_CONFIRM_DRAFT",
+      message: "Create the mission only after user confirmation.",
+      commands_now: [],
+      after_user_confirms_goals: ['unclog --json mission create --title "Compact mission title"']
+    },
+    commands_now: []
+  });
+  const client = {
+    async command(command, payload) {
+      if (command === "next") return intakeEnvelope();
+      if (command === "goals.lint") return confirmationEnvelope();
+      if (command === "mission.create") {
+        mutations.push({ command, payload });
+        version += 1;
+        return envelope(command, {
+          mission_id: "M001",
+          project: { id: "project-1", projectVersion: version },
+          commands_now: []
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+
+  const intake = await runtime.next();
+  const linted = await runtime.act({ action_id: intake.allowed_actions[0].action_id });
+  assert.equal(linted.allowed_actions[0].command, "mission.create");
+  assert.equal(linted.allowed_actions[0].requires_user_confirmation, true);
+
+  const created = await runtime.act({
+    action_id: linted.allowed_actions[0].action_id,
+    input: { title: "Disposable queue lab" }
+  });
+  assert.equal(created.code, undefined, JSON.stringify(created));
+  assert.equal(created.mission_id, "M001");
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].payload.expected_project_version, 0);
+  assert.equal(mutations[0].payload.title, "Disposable queue lab");
+});
+
 test("unclog_act re-fetches authority, binds mission/action/version, and rejects stale or arbitrary input", async () => {
   const root = repository();
   const mutations = [];

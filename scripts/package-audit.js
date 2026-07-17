@@ -18,7 +18,7 @@ for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unc
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.3") {
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.4") {
   throw new Error("Public package identity must remain explicit and version pinned.");
 }
 if (manifest.dependencies?.["@modelcontextprotocol/sdk"] !== "1.29.0" || manifest.dependencies?.zod !== "3.25.76") {
@@ -51,7 +51,7 @@ if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes(
 
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 for (const required of [
-  "unclog-bridge@1.1.3 connect",
+  "unclog-bridge@1.1.4 connect",
   "Unclog connected. Start a new task and say: Use Unclog.",
   "unclog_next",
   "unclog_act",
