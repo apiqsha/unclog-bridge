@@ -1779,20 +1779,68 @@ function renderHostedTransport(value, key = "") {
   return renderCanonicalHostedCommand(value);
 }
 
-function compactDraftListing(result) {
+function boundedDraftPreviewText(value, maxChars = 160) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+}
+
+function readLocalDraftPreview(draft, options = {}) {
+  try {
+    const root = options.root || resolveGitRoot(options.cwd || process.cwd());
+    const goalsPath = resolveDraftArtifactPath(draft.file, { ...options, root });
+    const statusPath = resolveDraftArtifactPath(draft.status_file, { ...options, root });
+    if (goalsPath.name !== "unclog_goals.json" || statusPath.name !== "status.json" || goalsPath.draftId !== statusPath.draftId) {
+      throw new Error("local_draft_preview_path_mismatch");
+    }
+    const goalsDocument = readWorkflowJson(goalsPath.target, "local goals draft");
+    const statusDocument = readWorkflowJson(statusPath.target, "local draft status");
+    const goals = Array.isArray(goalsDocument.goals) ? goalsDocument.goals : [];
+    const firstGoal = goals.find((goal) => goal && typeof goal === "object");
+    return {
+      available: true,
+      state: goals.length === 0 ? "empty" : "has_goals",
+      top_level_goal_count: goals.length,
+      first_big_goal: boundedDraftPreviewText(firstGoal && firstGoal.text),
+      last_edited_at: String(statusDocument.updated_at || statusDocument.created_at || draft.updated_at || "") || null,
+      source: "bounded_local_draft_preview"
+    };
+  } catch {
+    return {
+      available: false,
+      state: "unavailable",
+      top_level_goal_count: null,
+      first_big_goal: null,
+      last_edited_at: String(draft.updated_at || "") || null,
+      source: "bounded_local_draft_preview"
+    };
+  }
+}
+
+function compactDraftListing(result, options = {}) {
   if (result.command !== "drafts.list" || !Array.isArray(result.drafts)) return result;
   const allDrafts = result.drafts;
   const activeDrafts = allDrafts.filter((draft) => (
     draft && draft.status === "intake" && draft.editable === true
-  ));
+  )).map((draft) => ({
+    ...draft,
+    local_preview: readLocalDraftPreview(draft, options)
+  }));
+  const availablePreviews = activeDrafts.map((draft) => draft.local_preview).filter((preview) => preview.available);
   return {
     ...result,
     drafts: activeDrafts,
     draft_summary: {
       active_editable_count: activeDrafts.length,
+      empty_count: availablePreviews.filter((preview) => preview.state === "empty").length,
+      with_goals_count: availablePreviews.filter((preview) => preview.state === "has_goals").length,
+      preview_unavailable_count: activeDrafts.length - availablePreviews.length,
       submitted_history_count: allDrafts.filter((draft) => draft && draft.status === "submitted").length,
       total_count: allDrafts.length,
       default_view: "active_editable_only",
+      selection_rule: "Match the draft to the user's current request; recency alone is not a semantic match.",
+      create_new_when: "The request is clearly independent and no active draft matches.",
       history_command: `npx --yes unclog-bridge@${BRIDGE_VERSION} drafts list --raw`
     }
   };
@@ -1827,7 +1875,7 @@ function presentHostedResult(result, options = {}) {
   for (const key of ["command_status", "domain", "entitlement", "local_contract", "refresh", "source"]) {
     delete rendered[key];
   }
-  rendered = compactDraftListing(rendered);
+  rendered = compactDraftListing(rendered, options);
   return rendered;
 }
 
@@ -2511,7 +2559,7 @@ async function main(argv = process.argv.slice(2)) {
     const localOutput = parsed.localOutputPath
       ? writeHostedOutputFile(parsed.localOutputPath, result)
       : null;
-    const presented = presentHostedResult(result, { raw: rawOutput });
+    const presented = presentHostedResult(result, { raw: rawOutput, cwd: process.cwd() });
     console.log(JSON.stringify({
       ...presented,
       ...(localOutput ? { local_output: localOutput } : {}),

@@ -1014,11 +1014,11 @@ test("adapter prompt is minimal and useless without server auth", async () => {
 test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
   assert.equal(
     renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
-    "npx --yes unclog-bridge@1.0.5 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
+    "npx --yes unclog-bridge@1.0.6 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
   );
   const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.5 drafts list/);
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.5 goals template --draft/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.6 drafts list/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.6 goals template --draft/);
   assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
   assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
   assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
@@ -1047,7 +1047,7 @@ test("default customer presentation is compact, executable, and keeps raw diagno
     }
   });
   const compact = presentHostedResult(hosted);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.5 drafts list");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.6 drafts list");
   assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
   assert.equal(compact.next_action.command, compact.commands_now[0]);
   assert.equal(compact.drafts.length, 1);
@@ -1055,15 +1055,65 @@ test("default customer presentation is compact, executable, and keeps raw diagno
   assert.equal(compact.draft_summary.submitted_history_count, 1);
   assert.equal(compact.domain, undefined);
   assert.equal(compact.source, undefined);
-  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.5 drafts list/);
+  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.6 drafts list/);
   assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
-  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.5");
+  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.6");
 
   const raw = presentHostedResult(hosted, { raw: true });
   assert.equal(raw.commands_now[0], "unclog --json drafts list");
-  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.5 drafts list");
+  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.6 drafts list");
   assert.equal(raw.drafts.length, 2);
   assert.deepEqual(raw.domain, { response: { duplicated: true } });
+});
+
+test("default draft presentation adds bounded local context without changing the hosted payload", () => {
+  const repository = tempStorage();
+  fs.mkdirSync(path.join(repository, ".git"));
+  const emptyId = "D20260717-120000-a1b2c3";
+  const filledId = "D20260717-120100-d4e5f6";
+  const makeDraft = (draftId, goals, updatedAt) => {
+    const directory = path.join(repository, ".unclog-drafts", draftId);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "unclog_goals.json"), JSON.stringify({ goals }, null, 2));
+    fs.writeFileSync(path.join(directory, "status.json"), JSON.stringify({
+      draft_id: draftId,
+      kind: "goals_intake",
+      status: "intake",
+      mission_id: null,
+      goals_file: "unclog_goals.json",
+      created_at: updatedAt,
+      updated_at: updatedAt
+    }, null, 2));
+    return {
+      draft_id: draftId,
+      status: "intake",
+      status_file: `.unclog-drafts/${draftId}/status.json`,
+      file: `.unclog-drafts/${draftId}/unclog_goals.json`,
+      editable: true
+    };
+  };
+  const empty = makeDraft(emptyId, [], "2026-07-17T04:00:00Z");
+  const longText = "A cold agent can identify the correct active draft ".repeat(6).trim();
+  const filled = makeDraft(filledId, [{ text: longText, children: [] }], "2026-07-17T04:01:00Z");
+  const hosted = hostedOk("drafts.list", {
+    drafts: [filled, empty],
+    commands_now: ["unclog --json drafts list"]
+  });
+
+  const presented = presentHostedResult(hosted, { cwd: repository });
+  assert.deepEqual(presented.drafts.map((draft) => draft.local_preview.state), ["has_goals", "empty"]);
+  assert.equal(presented.drafts[0].local_preview.top_level_goal_count, 1);
+  assert.equal(presented.drafts[0].local_preview.last_edited_at, "2026-07-17T04:01:00Z");
+  assert.ok(presented.drafts[0].local_preview.first_big_goal.length <= 160);
+  assert.equal(presented.drafts[1].local_preview.first_big_goal, null);
+  assert.equal(presented.draft_summary.empty_count, 1);
+  assert.equal(presented.draft_summary.with_goals_count, 1);
+  assert.equal(presented.draft_summary.preview_unavailable_count, 0);
+  assert.match(presented.draft_summary.selection_rule, /recency alone is not a semantic match/);
+
+  const raw = presentHostedResult(hosted, { raw: true, cwd: repository });
+  assert.equal(raw.drafts[0].local_preview, undefined);
+  assert.equal(raw.drafts[0].first_big_goal, undefined);
 });
 
 test("raw and debug presentation flags never enter the hosted workflow payload", () => {
