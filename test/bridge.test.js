@@ -1015,11 +1015,11 @@ test("adapter prompt is minimal and useless without server auth", async () => {
 test("thin bridge renders server notation into pinned executable commands without installing a local brain", () => {
   assert.equal(
     renderCanonicalHostedCommand("unclog --mission M001 --json goals lock --file .unclog-drafts/D1/unclog_goals.json"),
-    "npx --yes unclog-bridge@1.0.10 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
+    "npx --yes unclog-bridge@1.0.11 --mission M001 goals lock --file .unclog-drafts/D1/unclog_goals.json"
   );
   const guidance = renderHostedGuidance("Run `unclog --json drafts list`.\n\n```powershell\nunclog --json goals template --draft\n```");
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.10 drafts list/);
-  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.10 goals template --draft/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.11 drafts list/);
+  assert.match(guidance, /npx --yes unclog-bridge@1\.0\.11 goals template --draft/);
   assert.doesNotMatch(guidance, /`unclog --json|^unclog --json/m);
   assert.equal(renderCanonicalHostedCommand("Unclog is connected."), "Unclog is connected.");
   assert.equal(renderHostedGuidance("Unclog owns workflow state."), "Unclog owns workflow state.");
@@ -1048,7 +1048,7 @@ test("default customer presentation is compact, executable, and keeps raw diagno
     }
   });
   const compact = presentHostedResult(hosted);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.10 drafts list");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 drafts list");
   assert.deepEqual(compact.commands_now, compact.bridge_commands_now);
   assert.equal(compact.next_action.command, compact.commands_now[0]);
   assert.equal(compact.drafts.length, 1);
@@ -1056,13 +1056,13 @@ test("default customer presentation is compact, executable, and keeps raw diagno
   assert.equal(compact.draft_summary.submitted_history_count, 1);
   assert.equal(compact.domain, undefined);
   assert.equal(compact.source, undefined);
-  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.10 drafts list/);
+  assert.match(compact.agent_instruction.guidance_markdown, /npx --yes unclog-bridge@1\.0\.11 drafts list/);
   assert.equal(compact.agent_instruction.canonical_guidance_sha256, "server-hash");
-  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.10");
+  assert.equal(compact.agent_instruction.transport.rendered_by_bridge_version, "1.0.11");
 
   const raw = presentHostedResult(hosted, { raw: true });
   assert.equal(raw.commands_now[0], "unclog --json drafts list");
-  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.10 drafts list");
+  assert.equal(raw.bridge_commands_now[0], "npx --yes unclog-bridge@1.0.11 drafts list");
   assert.equal(raw.drafts.length, 2);
   assert.deepEqual(raw.domain, { response: { duplicated: true } });
 });
@@ -1161,7 +1161,7 @@ test("manager monitoring keeps actionable guidance while duplicate state project
   assert.deepEqual(compact.manager_live_notes, hosted.manager_live_notes);
   assert.equal(compact.agent_instruction.guidance_markdown, undefined);
   assert.match(compact.agent_instruction.guidance_delivery, /omits repeated full phase guidance/);
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.10 --mission M001 agents watch");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 --mission M001 agents watch");
   assert.equal(compact.next, undefined);
   assert.equal(compact.bridge_commands_now, undefined);
 
@@ -1215,11 +1215,11 @@ test("manager watch keeps observed stale recovery while duplicate assignment pro
     reason: "handoff_unconfirmed",
     progress_status: "pending",
     handoff_status: "awaiting_worker_packet",
-    handoff_command: "npx --yes unclog-bridge@1.0.10 --mission M001 agents handoff --agent-id sub-1"
+    handoff_command: "npx --yes unclog-bridge@1.0.11 --mission M001 agents handoff --agent-id sub-1"
   }]);
   assert.equal(compact.next_action.code, "HANDLE_ATTENTION_WORKERS");
   assert.equal(compact.next_action.attention_kind, "handoff_unconfirmed");
-  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.10 --mission M001 agents handoff --agent-id sub-1");
+  assert.equal(compact.commands_now[0], "npx --yes unclog-bridge@1.0.11 --mission M001 agents handoff --agent-id sub-1");
   assert.equal(compact.agent_assignment, undefined);
   assert.equal(compact.agents, undefined);
   assert.equal(compact.agent_progress, undefined);
@@ -1253,6 +1253,60 @@ test("routine manager monitoring hides no-op local reconciliation while other co
   );
   assert.deepEqual(normal.local_artifacts, localArtifacts);
   assert.deepEqual(normal.adapter_refresh, adapterRefresh);
+});
+
+test("worker handoff defaults to the exact cold-worker prompt without manager diagnostics", () => {
+  const hosted = hostedOk("agents.handoff", {
+    project: { id: "unclog", projectVersion: 20 },
+    billing: { provider: "merchant_of_record" },
+    contract: { normal_command_count: 104 },
+    device: { state: "approved" },
+    manager_instruction: "Give first_prompt to a separate worker thread.",
+    handoff_issued_at: "2026-07-17T11:58:15Z",
+    handoff_ack_rule: "The worker acknowledges by fetching its packet.",
+    mission_id: "M001",
+    agent_id: "sub-1",
+    label: "Hosted worker",
+    worker_status: "pending",
+    assigned_root_ids: ["G001"],
+    manager_reference_media_count: 0,
+    packet_command: "unclog --mission M001 --json agents packet --agent-id sub-1 --focus",
+    first_prompt: "Start by running: `npx --yes unclog-bridge@1.0.11 --mission M001 agents packet --agent-id sub-1 --focus`",
+    transport: "official_thin_bridge",
+    customer_safe: true,
+    handoff_required: true,
+    after_handoff_command: "unclog --mission M001 --json agents status",
+    commands_now: [],
+    agent_instruction: {
+      schema: "unclog-agent-instruction/1",
+      instruction_id: "UGI_handoff",
+      phase: "worker_scope",
+      next_action_code: "WORKER_THREAD_HANDOFF_REQUIRED",
+      authority: "hosted_unclog_server",
+      guidance_sha256: "server-hash",
+      guidance_markdown: "Full manager phase guidance is intentionally large.",
+      transport: { canonical_command_notation_only: true }
+    }
+  });
+
+  const compact = presentHostedResult(hosted);
+  assert.equal(compact.output_view.mode, "compact_worker_handoff");
+  assert.match(compact.first_prompt, /npx --yes unclog-bridge@1\.0\.11 --mission M001 agents packet --agent-id sub-1 --focus/);
+  assert.equal(compact.billing, undefined);
+  assert.equal(compact.contract, undefined);
+  assert.equal(compact.device, undefined);
+  assert.equal(compact.agent_instruction.guidance_markdown, undefined);
+  assert.match(compact.agent_instruction.guidance_delivery, /separate worker receives complete live guidance/);
+  const composed = composeHostedCliOutput(compact, {
+    localArtifacts: { applied: 0, reconciled: true },
+    adapterRefresh: { tool: "codex", removedLegacyAdapter: false }
+  });
+  assert.equal(composed.local_artifacts, undefined);
+  assert.equal(composed.adapter_refresh, undefined);
+
+  const raw = presentHostedResult(hosted, { raw: true });
+  assert.deepEqual(raw.billing, hosted.billing);
+  assert.equal(raw.agent_instruction.guidance_markdown, hosted.agent_instruction.guidance_markdown);
 });
 
 test("raw and debug presentation flags never enter the hosted workflow payload", () => {

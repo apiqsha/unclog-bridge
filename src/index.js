@@ -1961,14 +1961,69 @@ function compactManagerMonitoring(result) {
   return compact;
 }
 
+function compactWorkerHandoff(result) {
+  if (!result || result.command !== "agents.handoff" || !result.first_prompt) return result;
+  const keys = [
+    "allowed",
+    "status",
+    "command",
+    "next_action",
+    "commands_now",
+    "project",
+    "manager_instruction",
+    "handoff_issued_at",
+    "handoff_ack_rule",
+    "mission_id",
+    "agent_id",
+    "label",
+    "worker_status",
+    "assigned_root_ids",
+    "manager_reference_media",
+    "manager_reference_media_count",
+    "packet_command",
+    "first_prompt",
+    "transport",
+    "customer_safe",
+    "handoff_required",
+    "after_handoff_command"
+  ];
+  const compact = Object.fromEntries(
+    keys.filter((key) => Object.hasOwn(result, key)).map((key) => [key, result[key]])
+  );
+  if (result.agent_instruction && typeof result.agent_instruction === "object") {
+    const instruction = result.agent_instruction;
+    compact.agent_instruction = Object.fromEntries(Object.entries({
+      schema: instruction.schema,
+      instruction_id: instruction.instruction_id,
+      phase: instruction.phase,
+      next_action_code: instruction.next_action_code,
+      authority: instruction.authority,
+      guidance_sha256: instruction.guidance_sha256,
+      canonical_guidance_sha256: instruction.canonical_guidance_sha256,
+      transport: instruction.transport,
+      guidance_delivery: "The manager only hands off first_prompt. The separate worker receives complete live guidance when it runs the packet command in that prompt."
+    }).filter(([, value]) => value !== undefined));
+  }
+  compact.output_view = {
+    mode: "compact_worker_handoff",
+    preserved: [...keys, "agent_instruction"].filter((key) => Object.hasOwn(compact, key)),
+    full_diagnostics: "Use --raw only for human diagnostics; never execute canonical bare unclog commands from raw output."
+  };
+  return compact;
+}
+
 function composeHostedCliOutput(presented, options = {}) {
   const viewMode = String(presented?.output_view?.mode || "");
-  const compactManagerMonitor = ["compact_manager_monitor", "compact_manager_watch"].includes(viewMode);
+  const compactNoopLocalEffects = [
+    "compact_manager_monitor",
+    "compact_manager_watch",
+    "compact_worker_handoff"
+  ].includes(viewMode);
   return {
     ...presented,
     ...(options.localOutput ? { local_output: options.localOutput } : {}),
-    ...(!compactManagerMonitor && options.localArtifacts ? { local_artifacts: options.localArtifacts } : {}),
-    ...(!compactManagerMonitor && options.adapterRefresh ? { adapter_refresh: options.adapterRefresh } : {})
+    ...(!compactNoopLocalEffects && options.localArtifacts ? { local_artifacts: options.localArtifacts } : {}),
+    ...(!compactNoopLocalEffects && options.adapterRefresh ? { adapter_refresh: options.adapterRefresh } : {})
   };
 }
 
@@ -2003,6 +2058,7 @@ function presentHostedResult(result, options = {}) {
   }
   rendered = compactDraftListing(rendered, options);
   rendered = compactManagerMonitoring(rendered);
+  rendered = compactWorkerHandoff(rendered);
   return rendered;
 }
 
