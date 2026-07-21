@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const CURRENT_VERSION = require("../package.json").version;
 
 const {
   BridgeServerError,
@@ -69,7 +70,7 @@ function fakeMcpInstall(options = {}) {
     persistent: true,
     serverName: "unclog",
     client: options.client,
-    packageVersion: "1.1.5",
+    packageVersion: CURRENT_VERSION,
     runtimeReused: false,
     configPath: path.join(options.homeDir, ".codex", "config.toml"),
     workspaceRoot: options.workspaceRoot,
@@ -91,11 +92,11 @@ function artifactHash(document) {
 
 function localParserCommands() {
   const repositoryRoot = path.resolve(__dirname, "../../..");
-  const privateParser = path.join(repositoryRoot, "codex-tools", "unclog", "unclog_lib", "cli.py");
-  if (!fs.existsSync(privateParser)) return null;
+  const workflowParser = path.join(repositoryRoot, "packages", "unclog-workflow-core", "unclog_lib", "cli.py");
+  if (!fs.existsSync(workflowParser)) return null;
   const script = [
     "import argparse, json, sys",
-    "sys.path.insert(0, 'codex-tools/unclog')",
+    "sys.path.insert(0, 'packages/unclog-workflow-core')",
     "from unclog_lib.cli import build_parser",
     "def walk(parser, prefix=()):",
     "    actions=[a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]",
@@ -396,6 +397,8 @@ test("hosted response contracts expose local CLI response gates", () => {
   assert.deepEqual(hostedResponseContract("action proof-lint").requiredFields, ["action_id", "file"]);
   assert.ok(hostedResponseContract("action revise").workflowGates.includes("proof_audit"));
   assert.deepEqual(hostedResponseContract("set submit").requiredFields, ["summary", "proof", "closeout_sweep_file"]);
+  assert.deepEqual(hostedResponseContract("mission validate").requiredFields, ["summary", "proof"]);
+  assert.ok(hostedResponseContract("mission validate").workflowGates.includes("proof_required"));
   assert.ok(hostedResponseContract("set closeout-lint").responseKeys.includes("submit_command"));
   assert.ok(hostedResponseContract("version").responseKeys.includes("schema_contract_version"));
 
@@ -926,7 +929,9 @@ test("bridge rejects missing, malformed, mismatched, and misplaced review lifecy
 test("hosted output documents are written only to the requested local file", () => {
   const root = tempStorage();
   const storageDir = path.join(root, "session");
+  const workspaceDir = path.join(root, "workspace");
   const outputPath = path.join(root, "exports", "goals.json");
+  fs.mkdirSync(workspaceDir, { recursive: true });
   const written = writeHostedOutputFile(
     outputPath,
     { domain: { generated_file: { name: "server-choice.json", content: { goals: [{ id: "G001" }] } } } },
@@ -935,6 +940,14 @@ test("hosted output documents are written only to the requested local file", () 
   assert.equal(written.path, path.resolve(outputPath));
   assert.deepEqual(JSON.parse(fs.readFileSync(outputPath, "utf8")), { goals: [{ id: "G001" }] });
   assert.equal(fs.existsSync(path.join(root, "server-choice.json")), false);
+  const relativeWritten = writeHostedOutputFile(
+    "relative-output-proof.json",
+    { generated_file: { content: { action_id: "A002" } } },
+    { cwd: workspaceDir, sessionOptions: { storageDir, cwd: workspaceDir } }
+  );
+  assert.equal(relativeWritten.path, path.join(workspaceDir, "relative-output-proof.json"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(relativeWritten.path, "utf8")), { action_id: "A002" });
+  assert.equal(fs.existsSync(path.resolve("relative-output-proof.json")), false);
   assert.throws(
     () => writeHostedOutputFile(path.join(storageDir, "session.json"), { generated_file: { content: {} } }, {
       sessionOptions: { storageDir, cwd: process.cwd() }
@@ -1112,11 +1125,11 @@ test("repository identity resolves the Git root and rejects setup outside a repo
 
 test("approval fallback validates the hosted URL and remains usable when browser opening fails", async () => {
   let opened = "";
-  assert.equal(await openHostedApprovalUrl("https://app.unclog.dev/connect?code=ABCD-EFGH", {
+  assert.equal(await openHostedApprovalUrl("https://app.unclog.dev/dashboard/monitor?connect=ABCD-EFGH", {
     openBrowser: async (url) => { opened = url; return false; }
   }), false);
-  assert.equal(opened, "https://app.unclog.dev/connect?code=ABCD-EFGH");
-  assert.equal(await openHostedApprovalUrl("https://example.com/connect?code=ABCD-EFGH", {
+  assert.equal(opened, "https://app.unclog.dev/dashboard/monitor?connect=ABCD-EFGH");
+  assert.equal(await openHostedApprovalUrl("https://example.com/dashboard/monitor?connect=ABCD-EFGH", {
     openBrowser: async () => true
   }), false);
 });
@@ -1261,7 +1274,7 @@ test("setup intent connect waits for approval, stores a protected credential, in
             status: "authorization_pending",
             device_code: request.device_code,
             user_code: request.user_code,
-            verification_uri_complete: `https://app.unclog.dev/connect?code=${request.user_code}`,
+            verification_uri_complete: `https://app.unclog.dev/dashboard/monitor?connect=${request.user_code}`,
             expires_at: new Date(Date.now() + 60_000).toISOString(),
             interval: 0,
             project_id: "proj_solo_primary"
@@ -1311,7 +1324,7 @@ test("setup intent connect waits for approval, stores a protected credential, in
   assert.equal(statuses[0].stage, "waiting_for_dashboard_approval");
   assert.equal(statuses.some((status) => status.stage === "approval_poll_retry"), true);
   assert.equal(JSON.stringify(statuses[0]).includes("approval_url"), false);
-  assert.equal(statuses.some((status) => status.approval_url?.startsWith("https://app.unclog.dev/connect?code=")), true);
+  assert.equal(statuses.some((status) => status.approval_url?.startsWith("https://app.unclog.dev/dashboard/monitor?connect=")), true);
   assert.equal(statuses.find((status) => status.stage === "approval_fallback").browser_opened, false);
   const authorizePayload = JSON.parse(calls.find((call) => call.url.endsWith("/v1/bridge/device/authorize")).init.body);
   const firstCommandPayload = JSON.parse(calls.find((call) => call.url.endsWith("/v1/bridge/commands")).init.body);

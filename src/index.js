@@ -192,6 +192,12 @@ const COMMAND_GATE_CONTRACTS = {
     responseKeys: ["mission", "mission_id", "goal_progress", "validation_status"],
     workflowGates: ["confirmed_goal_intake", "mission_state_update"]
   },
+  "mission.validate": {
+    gate: "mission",
+    requiredFields: ["summary", "proof"],
+    responseKeys: ["mission", "mission_id", "mission_validation", "goal_progress", "validation_status"],
+    workflowGates: ["mission_state_update", "proof_required"]
+  },
   "goals.lock": {
     gate: "goal_lock",
     requiredFields: ["file"],
@@ -1249,7 +1255,7 @@ function attachReviewLifecycle(command, payload, flagTokens, options = {}) {
 }
 
 function writeHostedOutputFile(localOutputPath, result, options = {}) {
-  const target = path.resolve(String(localOutputPath || ""));
+  const target = path.resolve(options.cwd || process.cwd(), String(localOutputPath || ""));
   const generated = result && typeof result === "object"
     ? (result.generated_file || (result.domain && result.domain.generated_file))
     : null;

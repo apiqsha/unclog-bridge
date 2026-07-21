@@ -130,9 +130,11 @@ function commandName(raw, supportedCommands) {
 
 function projectVersion(result) {
   for (const value of [
+    result?.mutation?.next_project_version,
+    result?.mutation?.current_project_version,
+    result?.next_project_version,
     result?.project?.projectVersion,
     result?.project?.project_version,
-    result?.next_project_version,
     result?.expected_project_version,
     result?.refresh?.project_version
   ]) {
@@ -231,6 +233,57 @@ function commandBindsField(raw, field) {
   return tokens.includes(flag) || tokens.some((token) => token.startsWith(`${flag}=`));
 }
 
+function commandFlagValue(raw, field) {
+  const flag = `--${String(field).replaceAll("_", "-")}`;
+  const tokens = commandTokens(raw);
+  const index = tokens.indexOf(flag);
+  if (index >= 0) {
+    const next = tokens[index + 1];
+    return next === undefined || String(next).startsWith("--") ? "true" : String(next);
+  }
+  const inline = tokens.find((token) => token.startsWith(`${flag}=`));
+  return inline ? inline.slice(flag.length + 1) : "";
+}
+
+function commandBindsConcreteField(raw, field) {
+  if (!commandBindsField(raw, field)) return false;
+  const value = commandFlagValue(raw, field).trim().toLowerCase();
+  const fieldText = String(field).replaceAll("_", " ").trim().toLowerCase();
+  const placeholders = new Set([
+    "...",
+    `${fieldText} text`,
+    "compact reason",
+    "file/path or command/context proof"
+  ]);
+  return Boolean(value)
+    && !placeholders.has(value)
+    && !value.includes("...")
+    && !/^one compact paragraph under \d+ chars$/.test(value)
+    && !/^<[^>]+>$/.test(value);
+}
+
+function reviewLifecycleBinding(result, actor, command, raw) {
+  const decision = commandFlagValue(raw, "decision");
+  const stage = command === "action-plan.revise" && decision === "certain_10_10"
+    ? "baseline"
+    : command === "set.submit"
+      ? "final"
+      : command === "set.revise" && decision === "certain_flawless_optimized"
+        ? "activate"
+        : "";
+  if (!stage) return null;
+  const workerFiles = result?.worker_files || result?.next_action?.worker_files || result?.packet?.worker_files || {};
+  const file = String(stage === "baseline" ? workerFiles.action_review_file : workerFiles.set_review_file).trim();
+  const expected = stage === "baseline" ? /^unclog_action_review(?:_[A-Za-z0-9_-]+)?\.json$/ : /^unclog_set_review(?:_[A-Za-z0-9_-]+)?\.json$/;
+  if (!file || !expected.test(file) || file.includes("/") || file.includes("\\")) return null;
+  return {
+    required: true,
+    stage,
+    file,
+    actor: actor.agent_id || "manager"
+  };
+}
+
 function actionDescriptors(result, actor, deps) {
   const responseRequired = new Set([
     ...(Array.isArray(result?.required_fields) ? result.required_fields : []),
@@ -246,8 +299,9 @@ function actionDescriptors(result, actor, deps) {
     if (BLOCKED_MCP_COMMANDS.has(command)) continue;
     const contract = deps.hostedResponseContract(command);
     const contractRequired = (contract.requiredFields || []).filter((field) => (
-      auxiliary || !commandBindsField(raw, field)
+      auxiliary || !commandBindsConcreteField(raw, field)
     ));
+    const reviewLifecycle = reviewLifecycleBinding(result, actor, command, raw);
     const inputFields = [...new Set([
       ...contractRequired,
       ...(auxiliary ? [] : responseRequired)
@@ -260,12 +314,20 @@ function actionDescriptors(result, actor, deps) {
       required_input: inputFields,
       field_guide: Object.fromEntries(inputFields.map((field) => [field, fieldGuide[field] || contract.fieldGuide?.[field] || "Current workflow input."])),
       proof_required: contract.proofRequired === true,
+      ...(reviewLifecycle ? { review_lifecycle: reviewLifecycle } : {}),
       ...(condition ? { condition } : {}),
       ...(condition === "after_user_confirms_goals" ? { requires_user_confirmation: true } : {}),
       ...context
     });
   }
   return descriptors;
+}
+
+function descriptorFingerprint(descriptor) {
+  if (!descriptor || typeof descriptor !== "object") return "";
+  const copy = { ...descriptor };
+  delete copy.action_id;
+  return JSON.stringify(copy);
 }
 
 function sanitizeForMcp(value, key = "") {
@@ -331,8 +393,8 @@ function assertInput(input, allowedFields, requiredFields = []) {
   return clone(value);
 }
 
-function bindControlledInputToCliArgv(payload, values) {
-  if (!Array.isArray(payload.cli_argv)) return;
+function bindControlledInputToArgv(argv, values) {
+  if (!Array.isArray(argv)) return;
   for (const [field, value] of Object.entries(values)) {
     if (!["string", "number", "boolean"].includes(typeof value)) {
       const error = new Error(`unclog_act input field ${field} must be a scalar value.`);
@@ -340,19 +402,19 @@ function bindControlledInputToCliArgv(payload, values) {
       throw error;
     }
     const flag = `--${String(field).replaceAll("_", "-")}`;
-    const argv = [];
-    for (let index = 0; index < payload.cli_argv.length; index += 1) {
-      const token = String(payload.cli_argv[index]);
+    const nextArgv = [];
+    for (let index = 0; index < argv.length; index += 1) {
+      const token = String(argv[index]);
       if (token === flag) {
-        if (index + 1 < payload.cli_argv.length && !String(payload.cli_argv[index + 1]).startsWith("--")) index += 1;
+        if (index + 1 < argv.length && !String(argv[index + 1]).startsWith("--")) index += 1;
         continue;
       }
       if (token.startsWith(`${flag}=`)) continue;
-      argv.push(token);
+      nextArgv.push(token);
     }
-    if (value === true) argv.push(flag);
-    else if (value !== false) argv.push(flag, String(value));
-    payload.cli_argv = argv;
+    if (value === true) nextArgv.push(flag);
+    else if (value !== false) nextArgv.push(flag, String(value));
+    argv.splice(0, argv.length, ...nextArgv);
   }
 }
 
@@ -458,8 +520,32 @@ function createMcpRuntime(bridge, options = {}) {
         const cachedDescriptors = actionDescriptors(previousAuthority.result, previousAuthority.actor, deps);
         const cachedIndex = cachedDescriptors.findIndex((descriptor) => descriptor.action_id === requestedActionId);
         const cachedDescriptor = cachedIndex >= 0 ? cachedDescriptors[cachedIndex] : null;
+        const cachedRaw = cachedDescriptor
+          ? currentCommands(previousAuthority.result).find((candidate) => (
+            actionId(candidate, previousAuthority.result, previousAuthority.actor) === cachedDescriptor.action_id
+          ))
+          : null;
+        const samePhase = String(previousAuthority.result?.next_action?.code || "")
+          === String(current.result?.next_action?.code || "");
+        const refreshedEquivalentIndex = cachedDescriptor && cachedRaw && samePhase
+          ? descriptors.findIndex((candidate) => (
+            descriptorFingerprint(candidate) === descriptorFingerprint(cachedDescriptor)
+            && rawCommands.find((raw) => actionId(raw, current.result, current.actor) === candidate.action_id) === cachedRaw
+          ))
+          : -1;
+        if (refreshedEquivalentIndex >= 0) {
+          index = refreshedEquivalentIndex;
+        }
         const sameVersion = projectVersion(previousAuthority.result) === projectVersion(current.result);
-        if (cachedDescriptor?.condition === "after_user_confirms_goals" && cachedDescriptor.requires_user_confirmation === true && sameVersion) {
+        const confirmedMissionCreate = cachedDescriptor?.condition === "after_user_confirms_goals"
+          && cachedDescriptor.requires_user_confirmation === true;
+        const confirmedDraftGoalUpdate = cachedDescriptor?.condition === "after_matching_this_confirmed_draft_to_current_mission"
+          && cachedDescriptor.command === "goals.update"
+          && current.result?.next_action?.code === "UPDATE_GOALS_TREE";
+        const createMissingPostMissionDraft = cachedDescriptor?.command === "goals.template"
+          && previousAuthority.result?.next_action?.code === "GOAL_INTAKE_CREATE_LOCAL_DRAFT"
+          && current.result?.next_action?.code === "UPDATE_GOALS_TREE";
+        if (index < 0 && (confirmedMissionCreate || confirmedDraftGoalUpdate || createMissingPostMissionDraft) && sameVersion) {
           authority = previousAuthority;
           rawCommands = currentCommands(authority.result);
           descriptors = cachedDescriptors;
@@ -473,22 +559,25 @@ function createMcpRuntime(bridge, options = {}) {
         throw error;
       }
       const descriptor = descriptors[index];
-      const raw = rawCommands.find((candidate) => actionId(candidate, authority.result, authority.actor) === requestedActionId);
+      const raw = rawCommands.find((candidate) => actionId(candidate, authority.result, authority.actor) === descriptor.action_id);
       if (!raw) {
         const error = new Error("The current hosted action could not be resolved.");
         error.code = "mcp_action_stale";
         throw error;
       }
-      const parsed = bridge.parseHostedCommandArgv(commandTokens(raw), { cwd: workspaceRoot });
+      const allowedInput = [...new Set([...(descriptor.required_input || []), ...Object.keys(descriptor.field_guide || {})])];
+      const controlledInput = assertInput(input.input, allowedInput, descriptor.required_input || []);
+      const executableTokens = commandTokens(raw);
+      bindControlledInputToArgv(executableTokens, controlledInput);
+      if (descriptor.review_lifecycle && !commandBindsField(raw, "review_lifecycle_file")) {
+        executableTokens.push("--review-lifecycle-file", descriptor.review_lifecycle.file);
+      }
+      const parsed = bridge.parseHostedCommandArgv(executableTokens, { cwd: workspaceRoot });
       if (parsed.command !== descriptor.command || BLOCKED_MCP_COMMANDS.has(parsed.command)) {
         const error = new Error("The current action is not available through the non-destructive MCP surface.");
         error.code = "mcp_action_not_available";
         throw error;
       }
-      const allowedInput = [...new Set([...(descriptor.required_input || []), ...Object.keys(descriptor.field_guide || {})])];
-      const controlledInput = assertInput(input.input, allowedInput, descriptor.required_input || []);
-      Object.assign(parsed.payload, controlledInput);
-      bindControlledInputToCliArgv(parsed.payload, controlledInput);
       const version = projectVersion(authority.result);
       if (version !== null) parsed.payload.expected_project_version = version;
       const result = await client.command(parsed.command, parsed.payload);

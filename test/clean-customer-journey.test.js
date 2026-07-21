@@ -43,7 +43,7 @@ function commandEnvelope(state, command, extra = {}) {
     next_action: { code: "HOSTED_STEP_READY", message: "Continue through the current MCP action." },
     commands_now: [],
     agent_instruction: {
-      schema: "unclog-agent-instruction/1",
+      schema: "unclog-agent-instruction/2",
       instruction_id: `UGI_${state.phase}_${state.version}`,
       phase: state.phase,
       authority: "hosted_unclog_server",
@@ -364,7 +364,10 @@ test("fresh customer connects once then completes manager, cold-worker, proof, c
 
     manager = await next({ mission_id: "M001" });
     assert.equal(manager.allowed_actions[0].command, "mission.validate");
-    manager = await act(manager, { mission_id: "M001" });
+    manager = await act(manager, { mission_id: "M001" }, {
+      summary: "The clean hosted customer lifecycle completed successfully.",
+      proof: "Accepted action proof and closeout evidence passed."
+    });
     assert.equal(state.validated, true);
     assert.equal(manager.next_action.code, "MISSION_VALIDATED");
     assert.equal(state.goalDocumentReceived, true);

@@ -3,6 +3,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+const packageLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
 const publishWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "publish.yml"), "utf8");
 const allowedTopLevel = new Set(["LICENSE", "README.md", "package.json", "scripts", "src", "test", "package-lock.json"]);
 const actual = fs.readdirSync(root).filter((name) => !name.startsWith(".") && name !== "node_modules");
@@ -13,13 +14,16 @@ const source = fs.readdirSync(path.join(root, "src"))
   .filter((name) => name.endsWith(".js"))
   .map((name) => fs.readFileSync(path.join(root, "src", name), "utf8"))
   .join("\n");
-for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "unclog_lib", "hosted_workflow.py"]) {
+for (const forbidden of ["SUPABASE_SERVICE_ROLE_KEY", "codex-tools/unclog", "references/legacy", "unclog_lib", "hosted_workflow.py"]) {
   if (source.includes(forbidden)) throw new Error(`Forbidden server-only content: ${forbidden}`);
 }
 if (/\b(?:sk_live_|sb_secret_)[A-Za-z0-9_-]+\b/.test(source)) throw new Error("Credential-like material detected.");
 
-if (manifest.name !== "unclog-bridge" || manifest.private !== false || manifest.version !== "1.1.5") {
-  throw new Error("Public package identity must remain explicit and version pinned.");
+if (manifest.name !== "unclog-bridge" || manifest.private !== false || !/^\d+\.\d+\.\d+$/.test(manifest.version)) {
+  throw new Error("Public package identity must remain explicit and use a valid release version.");
+}
+if (packageLock.name !== manifest.name || packageLock.version !== manifest.version || packageLock.packages?.[""]?.version !== manifest.version) {
+  throw new Error("Package manifest and lockfile release versions must match exactly.");
 }
 if (manifest.dependencies?.["@modelcontextprotocol/sdk"] !== "1.29.0" || manifest.dependencies?.zod !== "3.25.76") {
   throw new Error("Persistent MCP runtime dependencies must remain exact and production pinned.");
@@ -51,7 +55,7 @@ if (!publishWorkflow.includes("secrets.NPM_TOKEN") || !publishWorkflow.includes(
 
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 for (const required of [
-  "unclog-bridge@1.1.5 connect",
+  `unclog-bridge@${manifest.version} connect`,
   "Unclog connected. Start a new task and say: Use Unclog.",
   "unclog_next",
   "unclog_act",
@@ -61,6 +65,10 @@ for (const required of [
   "30 seconds"
 ]) {
   if (!readme.includes(required)) throw new Error(`README is missing current customer contract: ${required}`);
+}
+const documentedVersions = [...readme.matchAll(/unclog-bridge@(\d+\.\d+\.\d+)/g)].map((match) => match[1]);
+if (!documentedVersions.length || documentedVersions.some((version) => version !== manifest.version)) {
+  throw new Error("Every README bridge command must use the package manifest version.");
 }
 if (/unclog-bridge@1\.0\.|\bfollow\b/.test(readme)) throw new Error("README contains retired routine CLI guidance.");
 

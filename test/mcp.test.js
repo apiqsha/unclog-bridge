@@ -188,6 +188,344 @@ test("confirmed mission-create authority survives a stateless next refresh at th
   assert.equal(mutations[0].payload.cli_argv.includes("Compact mission title"), false);
 });
 
+test("confirmed draft goal-update authority survives the post-list next refresh only at the same goals phase and version", async () => {
+  const root = repository();
+  const draftId = "D20260718-041500-c0ffee";
+  const file = `.unclog-drafts/${draftId}/unclog_goals.json`;
+  const statusFile = `.unclog-drafts/${draftId}/status.json`;
+  const document = { goals: [{ text: "Complete the confirmed hosted outcome", children: [] }] };
+  fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+  fs.writeFileSync(path.join(root, file), JSON.stringify(document));
+  fs.writeFileSync(path.join(root, statusFile), JSON.stringify({
+    draft_id: draftId,
+    kind: "goals_intake",
+    status: "intake",
+    mission_id: null,
+    goals_file: "unclog_goals.json"
+  }));
+  let version = 7;
+  const mutations = [];
+  const nextEnvelope = () => envelope("next", {
+    project: { id: "project-1", projectVersion: version },
+    next_action: { code: "UPDATE_GOALS_TREE", message: "Select the confirmed local draft." },
+    commands_now: ["unclog --mission M001 --json drafts list"]
+  });
+  const client = {
+    async command(command, payload) {
+      if (command === "next") return nextEnvelope();
+      if (command === "drafts.list") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          next_action: {
+            code: "GOALS_SELECT_CONFIRMED_LOCAL_DRAFT",
+            message: "Use only the matching confirmed draft.",
+            commands_now: [],
+            local_draft_actions: [{
+              command: `unclog --mission M001 --json goals update --file "${file}"`,
+              condition: "after_matching_this_confirmed_draft_to_current_mission",
+              draft_id: draftId,
+              file
+            }]
+          },
+          commands_now: []
+        });
+      }
+      if (command === "goals.update") {
+        mutations.push({ command, payload });
+        version += 1;
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          next_action: { code: "LOCK_GOALS_TREE", message: "Lock the submitted goals." },
+          commands_now: [`unclog --mission M001 --json goals lock --file "${file}"`]
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+
+  const current = await runtime.next({ mission_id: "M001" });
+  const listed = await runtime.act({ mission_id: "M001", action_id: current.allowed_actions[0].action_id });
+  assert.equal(listed.allowed_actions[0].command, "goals.update");
+  assert.equal(listed.allowed_actions[0].condition, "after_matching_this_confirmed_draft_to_current_mission");
+
+  const updated = await runtime.act({ mission_id: "M001", action_id: listed.allowed_actions[0].action_id });
+  assert.equal(updated.code, undefined, JSON.stringify(updated));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].payload.expected_project_version, 7);
+  assert.deepEqual(mutations[0].payload.workflow_document, document);
+  assert.equal(updated.allowed_actions[0].command, "goals.lock");
+});
+
+test("an empty post-mission draft list can create one controlled local draft only at the same goals version", async () => {
+  const root = repository();
+  let version = 9;
+  const calls = [];
+  const client = {
+    async command(command, payload) {
+      if (command === "next") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          next_action: { code: "UPDATE_GOALS_TREE", message: "Resume goal intake." },
+          commands_now: ["unclog --mission M001 --json drafts list"]
+        });
+      }
+      if (command === "drafts.list") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          next_action: {
+            code: "GOAL_INTAKE_CREATE_LOCAL_DRAFT",
+            message: "No active local goal-intake draft exists.",
+            command: "unclog --json goals template --draft",
+            commands_now: ["unclog --json goals template --draft"]
+          },
+          commands_now: ["unclog --json goals template --draft"]
+        });
+      }
+      if (command === "goals.template") {
+        calls.push({ command, payload });
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          next_action: { code: "UPDATE_GOALS_TREE", message: "Resume the controlled draft." },
+          commands_now: ["unclog --mission M001 --json drafts list"]
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const current = await runtime.next({ mission_id: "M001" });
+  const listed = await runtime.act({ mission_id: "M001", action_id: current.allowed_actions[0].action_id });
+  assert.equal(listed.allowed_actions[0].command, "goals.template");
+  const created = await runtime.act({ mission_id: "M001", action_id: listed.allowed_actions[0].action_id });
+  assert.equal(created.code, undefined, JSON.stringify(created));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.expected_project_version, 9);
+
+  const staleRuntime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const staleCurrent = await staleRuntime.next({ mission_id: "M001" });
+  const staleListed = await staleRuntime.act({ mission_id: "M001", action_id: staleCurrent.allowed_actions[0].action_id });
+  version += 1;
+  const stale = await staleRuntime.act({ mission_id: "M001", action_id: staleListed.allowed_actions[0].action_id });
+  assert.equal(stale.code, "mcp_action_stale");
+  assert.equal(calls.length, 1);
+});
+
+test("unclog_act remaps an exact fresh action when a read-side worker heartbeat only advances project version", async () => {
+  const root = repository();
+  const commandText = "unclog --mission M001 --json action-plan submit --agent-id sub-1 --file unclog_actions_sub1.json";
+  const planFile = path.join(root, "unclog_actions_sub1.json");
+  const plan = { schema: "action-plan/2", selected_small_goal_ids: ["G001"], actions: [] };
+  fs.writeFileSync(planFile, JSON.stringify(plan));
+  let version = 10;
+  const mutations = [];
+  const client = {
+    async command(command, payload) {
+      if (command === "agents.packet") {
+        const observedVersion = version;
+        version += 1;
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: observedVersion },
+          agent_id: "sub-1",
+          next_action: { code: "PLAN_WORKER_ACTIONS", message: "Submit the worker plan." },
+          commands_now: [commandText]
+        });
+      }
+      if (command === "action-plan.submit") {
+        mutations.push({ command, payload });
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: version },
+          agent_id: "sub-1",
+          next_action: { code: "REVIEW_ACTION_PLAN", message: "Review the submitted plan." },
+          commands_now: []
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const actor = { mission_id: "M001", agent_id: "sub-1", focus: true };
+
+  const current = await runtime.next(actor);
+  const acted = await runtime.act({ ...actor, action_id: current.allowed_actions[0].action_id });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].payload.expected_project_version, 11);
+  assert.deepEqual(mutations[0].payload.workflow_document, plan);
+});
+
+test("MCP binds the server-declared canonical review lifecycle file without exposing an arbitrary path input", async () => {
+  const root = repository();
+  const reviewFile = "unclog_action_review_sub-1.json";
+  const review = {
+    stage: "baseline",
+    mission_id: "M001",
+    goal_id: "G001",
+    action_plan_id: "AP001",
+    before: ["The action plan has not been executed."],
+    capture_context: { kind: "hosted_mcp", state: "action_plan_challenging" }
+  };
+  fs.writeFileSync(path.join(root, reviewFile), JSON.stringify(review));
+  const raw = 'unclog --mission M001 --json action-plan revise --agent-id sub-1 --decision certain_10_10 --reasoning "compact audit"';
+  const mutations = [];
+  const client = {
+    async command(command, payload) {
+      if (command === "agents.packet") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: 12 },
+          agent_id: "sub-1",
+          required_fields: ["decision", "reasoning"],
+          next_action: {
+            code: "REVISE_ACTION_PLAN",
+            message: "Accept only after the baseline review is captured.",
+            worker_files: { action_review_file: reviewFile, set_review_file: "unclog_set_review_sub-1.json" }
+          },
+          commands_now: [raw]
+        });
+      }
+      if (command === "action-plan.revise") {
+        mutations.push({ command, payload });
+        return envelope(command, { project: { id: "project-1", projectVersion: 13 } });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const actor = { mission_id: "M001", agent_id: "sub-1", focus: true };
+
+  const current = await runtime.next(actor);
+  assert.deepEqual(current.allowed_actions[0].review_lifecycle, {
+    required: true,
+    stage: "baseline",
+    file: reviewFile,
+    actor: "sub-1"
+  });
+  assert.equal(current.allowed_actions[0].required_input.includes("review_lifecycle_file"), false);
+  const acted = await runtime.act({
+    ...actor,
+    action_id: current.allowed_actions[0].action_id,
+    input: { decision: "certain_10_10", reasoning: "The current action plan is directly testable." }
+  });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  assert.equal(mutations.length, 1);
+  assert.deepEqual(mutations[0].payload.review_lifecycle, review);
+  assert.equal(mutations[0].payload.decision, "certain_flawless_optimized");
+  assert.equal(JSON.stringify(mutations[0].payload.cli_argv).includes(reviewFile), false);
+});
+
+test("MCP replaces server command placeholders with typed completion input", async () => {
+  const root = repository();
+  const closeoutFile = "unclog_checks_sub-1.json";
+  const reviewFile = "unclog_set_review_sub-1.json";
+  fs.writeFileSync(path.join(root, closeoutFile), JSON.stringify({
+    closeout_sweep: { schema: "small-goal-closeout/2", integration_result: { decision: "pass" } },
+    small_goal_summaries: [{ small_goal_id: "G002", human_summary: "The hosted workflow was verified end to end." }]
+  }));
+  fs.writeFileSync(path.join(root, reviewFile), JSON.stringify({
+    stage: "final",
+    mission_id: "M001",
+    goal_id: "G002",
+    action_plan_id: "AP001",
+    after: ["The hosted workflow was verified end to end."],
+    implementation_reasons: ["The current action set exercised the authoritative hosted workflow."],
+    safety_confidence: ["The completed evidence covers refresh and tenant isolation."],
+    concern_refs: [],
+    closeout_ref: "report-M001-G002"
+  }));
+  const raw = `unclog --mission M001 --json set submit --agent-id sub-1 --summary "..." --proof "file/path or command/context proof" --closeout-sweep-file ${closeoutFile}`;
+  const mutations = [];
+  const client = {
+    async command(command, payload) {
+      if (command === "agents.packet") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: 21 },
+          agent_id: "sub-1",
+          next_action: {
+            code: "SUBMIT_ACTION_SET",
+            message: "Submit the completed action set.",
+            worker_files: { set_review_file: reviewFile }
+          },
+          commands_now: [raw]
+        });
+      }
+      if (command === "set.submit") {
+        mutations.push({ command, payload });
+        return envelope(command, { project: { id: "project-1", projectVersion: 22 } });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const actor = { mission_id: "M001", agent_id: "sub-1", focus: true };
+
+  const current = await runtime.next(actor);
+  assert.deepEqual(current.allowed_actions[0].required_input, ["summary", "proof"]);
+  const acted = await runtime.act({
+    ...actor,
+    action_id: current.allowed_actions[0].action_id,
+    input: {
+      summary: "The clean hosted customer lifecycle completed with authoritative state intact.",
+      proof: "MCP mutations, browser relogin, tenant denial, and cleanup readback all passed."
+    }
+  });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].payload.summary, "The clean hosted customer lifecycle completed with authoritative state intact.");
+  assert.equal(mutations[0].payload.proof, "MCP mutations, browser relogin, tenant denial, and cleanup readback all passed.");
+  assert.deepEqual(mutations[0].payload.review_lifecycle, JSON.parse(fs.readFileSync(path.join(root, reviewFile), "utf8")));
+});
+
+test("MCP keeps a server-fixed audit decision while requiring real agent reasoning", async () => {
+  const root = repository();
+  const reviewFile = "unclog_set_review_sub-1.json";
+  const review = {
+    stage: "activate",
+    mission_id: "M001",
+    goal_id: "G002",
+    closeout_ref: "report-M001-G002",
+    final_audit_ref: "set-audit:M001:G002"
+  };
+  fs.writeFileSync(path.join(root, reviewFile), JSON.stringify(review));
+  const raw = 'unclog --mission M001 --json set revise --agent-id sub-1 --decision certain_flawless_optimized --reasoning "one compact paragraph under 600 chars"';
+  const mutations = [];
+  const client = {
+    async command(command, payload) {
+      if (command === "agents.packet") {
+        return envelope(command, {
+          project: { id: "project-1", projectVersion: 31 },
+          agent_id: "sub-1",
+          next_action: {
+            code: "REVISE_ACTION_SET",
+            message: "Audit the current action-set completion.",
+            worker_files: { set_review_file: reviewFile }
+          },
+          commands_now: [raw]
+        });
+      }
+      if (command === "set.revise") {
+        mutations.push({ command, payload });
+        return envelope(command, { project: { id: "project-1", projectVersion: 32 } });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+  const actor = { mission_id: "M001", agent_id: "sub-1", focus: true };
+
+  const current = await runtime.next(actor);
+  assert.deepEqual(current.allowed_actions[0].required_input, ["reasoning"]);
+  const acted = await runtime.act({
+    ...actor,
+    action_id: current.allowed_actions[0].action_id,
+    input: { reasoning: "The accepted proof and closeout directly cover every locked outcome." }
+  });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].payload.decision, "certain_flawless_optimized");
+  assert.equal(mutations[0].payload.reasoning, "The accepted proof and closeout directly cover every locked outcome.");
+  assert.deepEqual(mutations[0].payload.review_lifecycle, review);
+});
+
 test("unclog_act re-fetches authority, binds mission/action/version, and rejects stale or arbitrary input", async () => {
   const root = repository();
   const mutations = [];
