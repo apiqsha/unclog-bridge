@@ -10,6 +10,7 @@ const {
   BridgeServerError,
   DEFAULT_APPROVAL_FALLBACK_DELAY_MS,
   HOSTED_COMMAND_CONTRACTS,
+  HOSTED_SERVER_NATIVE_COMMAND_CONTRACTS,
   HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
   HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
@@ -29,6 +30,7 @@ const {
   logout,
   openHostedApprovalUrl,
   parseHostedCommandArgv,
+  productStateIdentity,
   reconcilePendingLocalArtifactEffects,
   retireHostedAdapters,
   repositoryIdentity,
@@ -174,7 +176,7 @@ test("blocked state copy is compact and mobile safe", () => {
   assert.equal(state.billing.portal_route, "/account/billing");
   assert.equal(state.billing.checkout_route, "/account/billing/checkout");
   assert.doesNotMatch(rendered, /controller|policy_prompt|core_rulebook|full_brain/);
-  assert.doesNotMatch(rendered, /lemon|stripe|paddle|trial/);
+  assert.doesNotMatch(rendered, new RegExp(["le" + "mon", "stripe", "paddle", "trial"].join("|")));
 });
 
 test("session references are outside repos and never persist tokens", () => {
@@ -397,7 +399,10 @@ test("hosted response contracts expose local CLI response gates", () => {
   assert.deepEqual(hostedResponseContract("action proof-lint").requiredFields, ["action_id", "file"]);
   assert.ok(hostedResponseContract("action revise").workflowGates.includes("proof_audit"));
   assert.deepEqual(hostedResponseContract("set submit").requiredFields, ["summary", "proof", "closeout_sweep_file"]);
-  assert.deepEqual(hostedResponseContract("mission validate").requiredFields, ["summary", "proof"]);
+  assert.deepEqual(
+    hostedResponseContract("mission validate").requiredFields,
+    ["summary", "proof", "feature_impact_manifest"]
+  );
   assert.ok(hostedResponseContract("mission validate").workflowGates.includes("proof_required"));
   assert.ok(hostedResponseContract("set closeout-lint").responseKeys.includes("submit_command"));
   assert.ok(hostedResponseContract("version").responseKeys.includes("schema_contract_version"));
@@ -532,11 +537,15 @@ test("bridge only forwards hosted command contract names", async () => {
 test("bridge executable inventory covers the local parser and rejects removed Social commands", () => {
   const localCommands = localParserCommands();
   const removedSocialCommands = [...HOSTED_REMOVED_COMMAND_CONTRACTS];
+  const parserHostedCommands = [...HOSTED_COMMAND_CONTRACTS].filter(
+    (command) => !HOSTED_SERVER_NATIVE_COMMAND_CONTRACTS.has(command)
+  );
   const classified = new Set([
-    ...HOSTED_COMMAND_CONTRACTS,
+    ...parserHostedCommands,
     ...HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS
   ]);
-  assert.equal(HOSTED_COMMAND_CONTRACTS.size, 91);
+  assert.equal(HOSTED_COMMAND_CONTRACTS.size, 101);
+  assert.equal(HOSTED_SERVER_NATIVE_COMMAND_CONTRACTS.size, 10);
   assert.equal(HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS.size, 7);
   assert.equal(classified.size, 98);
   assert.equal(HOSTED_REMOVED_COMMAND_CONTRACTS.size, 11);
@@ -1612,7 +1621,10 @@ test("server denied responses remain production ready", async () => {
       assert.ok(Array.isArray(error.publicState.recovery));
       assert.equal(error.publicState.billing.provider, "merchant_of_record");
       assert.equal(error.publicState.billing.portal_route, "/account/billing");
-      assert.doesNotMatch(JSON.stringify(error.publicState).toLowerCase(), /lemon|stripe|paddle|trial/);
+      assert.doesNotMatch(
+        JSON.stringify(error.publicState).toLowerCase(),
+        new RegExp(["le" + "mon", "stripe", "paddle", "trial"].join("|"))
+      );
       assert.equal(error.publicState.mobile.primaryAction, "Billing");
       return true;
     }

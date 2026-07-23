@@ -142,6 +142,23 @@ const LOCAL_ONLY_COMMAND_CONTRACTS = [
   "action-plan.add-small"
 ];
 
+const SERVER_NATIVE_LINEAGE_MUTATION_COMMANDS = [
+  "lineage.baseline.propose",
+  "lineage.observations.submit",
+  "lineage.reconcile.resolve",
+  "lineage.decision.propose",
+  "lineage.decision.resolve",
+  "lineage.impact.commit",
+  "lineage.checkpoint.record"
+];
+
+const SERVER_NATIVE_HOSTED_COMMAND_CONTRACTS = [
+  ...SERVER_NATIVE_LINEAGE_MUTATION_COMMANDS,
+  "lineage.inspect",
+  "lineage.timeline",
+  "lineage.context"
+];
+
 const REMOVED_SOCIAL_COMMAND_CONTRACTS = [
   "social.modes",
   "social.status",
@@ -156,7 +173,11 @@ const REMOVED_SOCIAL_COMMAND_CONTRACTS = [
   "social.interact"
 ];
 
-const HOSTED_COMMAND_CONTRACTS = new Set(NORMAL_HOSTED_COMMAND_CONTRACTS);
+const HOSTED_COMMAND_CONTRACTS = new Set([
+  ...NORMAL_HOSTED_COMMAND_CONTRACTS,
+  ...SERVER_NATIVE_HOSTED_COMMAND_CONTRACTS
+]);
+const HOSTED_SERVER_NATIVE_COMMAND_CONTRACTS = new Set(SERVER_NATIVE_HOSTED_COMMAND_CONTRACTS);
 const HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS = new Set(LOCAL_ONLY_COMMAND_CONTRACTS);
 const HOSTED_REMOVED_COMMAND_CONTRACTS = new Set(REMOVED_SOCIAL_COMMAND_CONTRACTS);
 const HOSTED_UNSUPPORTED_COMMAND_CONTRACTS = new Set([
@@ -173,7 +194,13 @@ const LOCAL_FIELD_GUIDE = {
   capacity: "Maximum number of already-assigned worker lanes that may run at once.",
   decision: "Audit decision accepted by the current workflow gate.",
   closeout_sweep_file: "Local closeout JSON path; the thin bridge checks JSON transport safety and sends the structured object for server-side workflow validation.",
+  feature_impact_manifest: "Bounded semantic Mission impact manifest; source, diff, repository contents, logs, binaries, and secrets are forbidden.",
+  feature_id: "Existing stable Feature Lineage id authorized by the current task or Feature Canvas.",
+  as_of_lineage_version: "Optional exact lineage version for a recorded-as-of read.",
   file: "Local workflow JSON path; the thin bridge checks JSON transport safety and sends the structured object for server-side workflow validation, never repository source.",
+  lineage_payload: "Bounded semantic Feature Lineage event proposed by the agent; the server supplies command and version fields.",
+  observation_batch: "Bounded semantic observations for the bridge-measured local product fingerprint; omit mechanical batch/observation IDs because the server derives them; no source or raw diff.",
+  reconciliation: "One bounded reconciliation decision and, only when accepted or mapped, its canonical semantic event.",
   proof: "Compact completed-evidence summary; the canonical validation result belongs in the structured proof document.",
   reason: "Compact blocker or state-change reason.",
   reasoning: "Compact audit reasoning for the selected gate.",
@@ -194,9 +221,51 @@ const COMMAND_GATE_CONTRACTS = {
   },
   "mission.validate": {
     gate: "mission",
-    requiredFields: ["summary", "proof"],
+    requiredFields: ["summary", "proof", "feature_impact_manifest"],
     responseKeys: ["mission", "mission_id", "mission_validation", "goal_progress", "validation_status"],
     workflowGates: ["mission_state_update", "proof_required"]
+  },
+  "lineage.baseline.propose": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["lineage_payload"],
+    responseKeys: ["lineage_version", "event_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "baseline_import"]
+  },
+  "lineage.observations.submit": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["observation_batch"],
+    responseKeys: ["lineage_version", "observation_batch_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "observation_staging"]
+  },
+  "lineage.reconcile.resolve": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["observation_id", "reconciliation"],
+    responseKeys: ["lineage_version", "observation_id", "event_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "reconciliation"]
+  },
+  "lineage.decision.propose": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["lineage_payload"],
+    responseKeys: ["lineage_version", "event_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "decision_attribution"]
+  },
+  "lineage.decision.resolve": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["lineage_payload"],
+    responseKeys: ["lineage_version", "event_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "decision_attribution"]
+  },
+  "lineage.impact.commit": {
+    gate: "feature_lineage_mutation",
+    requiredFields: ["lineage_payload"],
+    responseKeys: ["lineage_version", "event_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "impact_capture"]
+  },
+  "lineage.checkpoint.record": {
+    gate: "feature_lineage_mutation",
+    requiredFields: [],
+    responseKeys: ["lineage_version", "checkpoint_id", "feature_lineage"],
+    workflowGates: ["bounded_lineage_write", "mechanical_checkpoint"]
   },
   "goals.lock": {
     gate: "goal_lock",
@@ -430,6 +499,24 @@ const COMMAND_GATE_CONTRACTS = {
     requiredFields: ["text"],
     responseKeys: ["item", "counts", "changed_items"],
     workflowGates: ["inbox_state_update"]
+  },
+  "lineage.inspect": {
+    gate: "feature_lineage_read",
+    requiredFields: ["feature_id"],
+    responseKeys: ["feature_context", "feature", "origin", "lineage_version", "as_of_lineage_version"],
+    workflowGates: ["bounded_lineage_read", "version_bound_context"]
+  },
+  "lineage.timeline": {
+    gate: "feature_lineage_read",
+    requiredFields: ["feature_id"],
+    responseKeys: ["feature_id", "events", "next_cursor", "lineage_version", "as_of_lineage_version"],
+    workflowGates: ["bounded_lineage_read", "keyset_pagination"]
+  },
+  "lineage.context": {
+    gate: "feature_lineage_read",
+    requiredFields: ["feature_id"],
+    responseKeys: ["feature_context", "lineage_version", "as_of_lineage_version"],
+    workflowGates: ["bounded_lineage_read", "version_bound_context"]
   }
 };
 
@@ -469,6 +556,12 @@ const PREFIX_GATE_CONTRACTS = [
     gate: "current_action_set",
     responseKeys: ["current_action_set", "unchecked_actions", "field_guide"],
     workflowGates: ["current_action_set"]
+  },
+  {
+    prefix: "lineage.",
+    gate: "feature_lineage_read",
+    responseKeys: ["feature_context", "lineage_version", "as_of_lineage_version"],
+    workflowGates: ["bounded_lineage_read"]
   }
 ];
 
@@ -836,14 +929,18 @@ const TOP_LEVEL_PAYLOAD_FLAGS = new Set([
   "agent_id",
   "after",
   "after_summary",
+  "as_of_lineage_version",
   "answer",
   "before",
   "before_summary",
   "capacity",
   "closeout_sweep_file",
+  "cursor",
   "decision",
   "enabled",
   "expected_project_version",
+  "expected_lineage_version",
+  "feature_id",
   "fresh",
   "goal",
   "goal_id",
@@ -854,6 +951,7 @@ const TOP_LEVEL_PAYLOAD_FLAGS = new Set([
   "mark_reviewed",
   "mission_id",
   "name",
+  "observation_id",
   "project_id",
   "proof",
   "raw",
@@ -863,6 +961,7 @@ const TOP_LEVEL_PAYLOAD_FLAGS = new Set([
   "requires_coordination",
   "runtime_identity",
   "seed",
+  "stale_context_override_authority",
   "status",
   "summary",
   "text",
@@ -1680,6 +1779,104 @@ function repositoryIdentity(cwd = process.cwd()) {
     root: gitRoot,
     label: path.basename(gitRoot) || "Repository",
     fingerprint: crypto.createHash("sha256").update(gitRoot).digest("hex")
+  };
+}
+
+function gitOutput(root, args, options = {}) {
+  const result = childProcess.spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    maxBuffer: options.maxBuffer || 8 * 1024 * 1024,
+    windowsHide: true
+  });
+  if (result.status !== 0) {
+    if (options.allowFailure === true) return "";
+    const error = new BridgeServerError(
+      "git_product_state_unavailable",
+      "Hosted Unclog could not calculate the local product fingerprint.",
+      blockedState("git_product_state_unavailable")
+    );
+    throw error;
+  }
+  return String(result.stdout || "");
+}
+
+function porcelainV2Entries(raw) {
+  const records = String(raw || "").split("\0");
+  const entries = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record || record.startsWith("# ") || record.startsWith("! ")) continue;
+    if (record.startsWith("? ")) {
+      entries.push({ state: "?", path: record.slice(2) });
+      continue;
+    }
+    const kind = record[0];
+    const fixedFields = kind === "2" ? 9 : (kind === "u" ? 10 : (kind === "1" ? 8 : 0));
+    if (!fixedFields) continue;
+    let cursor = 0;
+    for (let field = 0; field < fixedFields; field += 1) {
+      cursor = record.indexOf(" ", cursor);
+      if (cursor < 0) break;
+      cursor += 1;
+    }
+    if (cursor <= 0 || cursor >= record.length) continue;
+    entries.push({ state: record.slice(0, 3), path: record.slice(cursor) });
+    if (kind === "2") index += 1;
+  }
+  return entries;
+}
+
+function productStateIdentity(cwd = process.cwd()) {
+  const repository = repositoryIdentity(cwd);
+  const branch = (() => {
+    const result = childProcess.spawnSync(
+      "git",
+      ["-C", repository.root, "symbolic-ref", "--quiet", "--short", "HEAD"],
+      { encoding: "utf8", windowsHide: true }
+    );
+    if (result.status !== 0) return { name: "", state: "detached" };
+    const name = String(result.stdout || "").trim();
+    return {
+      name,
+      state: /^(?:main|master|trunk)$/.test(name) ? "main" : "branch"
+    };
+  })();
+  const headTree = gitOutput(
+    repository.root,
+    ["rev-parse", "--verify", "HEAD^{tree}"],
+    { allowFailure: true }
+  ).trim() || "unborn";
+  const status = gitOutput(
+    repository.root,
+    ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+    { maxBuffer: 32 * 1024 * 1024 }
+  );
+  const entries = porcelainV2Entries(status)
+    .map((entry) => {
+      const result = childProcess.spawnSync(
+        "git",
+        ["-C", repository.root, "hash-object", "--no-filters", "--", entry.path],
+        { encoding: "utf8", windowsHide: true }
+      );
+      return {
+        state: entry.state,
+        path: entry.path,
+        object: result.status === 0 ? String(result.stdout || "").trim() : "deleted"
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path) || left.state.localeCompare(right.state));
+  const material = JSON.stringify({
+    schema: "unclog-local-product-fingerprint/1",
+    head_tree: headTree,
+    branch_state: branch.state,
+    entries
+  });
+  return {
+    schema: "unclog-local-product-state/1",
+    repository_ref: `RPO_${repository.fingerprint.slice(0, 32)}`,
+    source_mode: "git",
+    fingerprint: crypto.createHash("sha256").update(material).digest("hex"),
+    branch_state: branch.state
   };
 }
 
@@ -2529,6 +2726,8 @@ module.exports = {
   DEFAULT_APPROVAL_FALLBACK_DELAY_MS,
   BridgeServerError,
   HOSTED_COMMAND_CONTRACTS,
+  HOSTED_SERVER_NATIVE_COMMAND_CONTRACTS,
+  SERVER_NATIVE_LINEAGE_MUTATION_COMMANDS,
   HOSTED_LOCAL_ONLY_COMMAND_CONTRACTS,
   HOSTED_REMOVED_COMMAND_CONTRACTS,
   HOSTED_UNSUPPORTED_COMMAND_CONTRACTS,
@@ -2555,6 +2754,7 @@ module.exports = {
   reconcilePendingLocalArtifactEffects,
   retireHostedAdapters,
   repositoryIdentity,
+  productStateIdentity,
   uninstallHostedMcp,
   writeHostedOutputFile
 };

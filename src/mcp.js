@@ -45,12 +45,23 @@ const STRIPPED_COMMAND_KEYS = new Set([
 
 const RESERVED_INPUT_KEYS = new Set([
   "action_id", "actor_id", "agent_id", "cli_argv", "command", "device_id", "expected_project_version",
-  "idempotency_key", "local_artifacts", "mission_id", "project_id", "project_version",
-  "repository", "session_token", "source", "token", "workflow_document"
+  "expected_lineage_version", "idempotency_key", "lineage_preflight", "local_artifacts",
+  "local_product_state", "mission_id", "project_id", "project_version", "repository",
+  "session_token", "source", "stale_context_override_authority", "token", "workflow_document"
 ]);
 
 const BLOCKED_MCP_COMMANDS = new Set(["mission.abandon", "goals.delete"]);
 const COMMAND_BOUND_FILE_FIELDS = new Set(["closeout_sweep_file", "file", "goal_contract_file", "review_lifecycle_file"]);
+const STRUCTURED_INPUT_FIELDS = new Set([
+  "feature_impact_manifest",
+  "lineage_payload",
+  "observation_batch",
+  "reconciliation"
+]);
+const USER_CONFIRMATION_CONDITIONS = new Set([
+  "after_user_confirms_goals",
+  "after_user_explicitly_authorizes_stale_product_context"
+]);
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -144,6 +155,20 @@ function projectVersion(result) {
   return null;
 }
 
+function lineageVersion(result) {
+  for (const value of [
+    result?.feature_lineage?.lineage_version,
+    result?.feature_context?.lineage_version,
+    result?.feature_context?.capsule?.lineage_version,
+    result?.as_of_lineage_version,
+    result?.lineage_version
+  ]) {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
 function currentCommandEntries(result) {
   const top = Array.isArray(result?.commands_now) ? result.commands_now : [];
   const nested = Array.isArray(result?.next_action?.commands_now) ? result.next_action.commands_now : [];
@@ -153,6 +178,8 @@ function currentCommandEntries(result) {
     ? result.next_action.after_user_confirms_goals
     : [];
   const conditionalActions = [];
+  const traceActions = [];
+  const lineageActions = [];
   const nextAction = result?.next_action && typeof result.next_action === "object" ? result.next_action : {};
   const addConditionalAction = (value) => {
     if (!value || typeof value !== "object" || typeof value.command !== "string" || !value.command.trim()) return;
@@ -168,6 +195,38 @@ function currentCommandEntries(result) {
   };
   if (Array.isArray(nextAction.local_draft_actions)) nextAction.local_draft_actions.forEach(addConditionalAction);
   addConditionalAction(nextAction.create_new_action);
+  const addTraceAction = (value) => {
+    if (!value || typeof value !== "object" || typeof value.command !== "string" || !value.command.trim()) return;
+    traceActions.push({
+      raw: value.command,
+      auxiliary: true,
+      condition: null,
+      context: {
+        ...(typeof value.feature_id === "string" ? { feature_id: value.feature_id } : {}),
+        ...(typeof value.lookup_kind === "string" ? { lookup_kind: value.lookup_kind } : {}),
+        ...(Number.isInteger(value.lineage_version) ? { lineage_version: value.lineage_version } : {})
+      }
+    });
+  };
+  if (Array.isArray(result?.feature_context?.trace_commands)) {
+    result.feature_context.trace_commands.forEach(addTraceAction);
+  }
+  const addLineageAction = (value) => {
+    if (!value || typeof value !== "object" || typeof value.command !== "string" || !value.command.trim()) return;
+    lineageActions.push({
+      raw: value.command,
+      auxiliary: true,
+      condition: String(value.condition || "when_feature_lineage_action_is_current"),
+      context: {
+        ...(typeof value.observation_id === "string" ? { observation_id: value.observation_id } : {}),
+        ...(typeof value.feature_id === "string" ? { feature_id: value.feature_id } : {}),
+        ...(Number.isInteger(value.lineage_version) ? { lineage_version: value.lineage_version } : {})
+      }
+    });
+  };
+  if (Array.isArray(result?.feature_lineage?.actions)) {
+    result.feature_lineage.actions.forEach(addLineageAction);
+  }
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
     if (Array.isArray(value)) {
@@ -201,6 +260,16 @@ function currentCommandEntries(result) {
     seen.add(entry.raw);
     entries.push(entry);
   }
+  for (const entry of traceActions) {
+    if (seen.has(entry.raw)) continue;
+    seen.add(entry.raw);
+    entries.push(entry);
+  }
+  for (const entry of lineageActions) {
+    if (seen.has(entry.raw)) continue;
+    seen.add(entry.raw);
+    entries.push(entry);
+  }
   return entries;
 }
 
@@ -220,6 +289,7 @@ function actionId(rawCommand, result, actor) {
   const material = JSON.stringify({
     rawCommand: String(rawCommand),
     projectVersion: projectVersion(result),
+    lineageVersion: lineageVersion(result),
     missionId: actor.mission_id,
     agentId: actor.agent_id,
     nextCode: result?.next_action?.code || ""
@@ -298,9 +368,12 @@ function actionDescriptors(result, actor, deps) {
     const command = commandName(raw, deps.supportedCommands);
     if (BLOCKED_MCP_COMMANDS.has(command)) continue;
     const contract = deps.hostedResponseContract(command);
-    const contractRequired = (contract.requiredFields || []).filter((field) => (
-      auxiliary || !commandBindsConcreteField(raw, field)
-    ));
+    const contractRequired = (contract.requiredFields || []).filter((field) => {
+      if (!auxiliary) return !commandBindsConcreteField(raw, field);
+      const traceContextBindsField = Object.prototype.hasOwnProperty.call(context, field)
+        && commandBindsConcreteField(raw, field);
+      return !traceContextBindsField;
+    });
     const reviewLifecycle = reviewLifecycleBinding(result, actor, command, raw);
     const inputFields = [...new Set([
       ...contractRequired,
@@ -316,7 +389,7 @@ function actionDescriptors(result, actor, deps) {
       proof_required: contract.proofRequired === true,
       ...(reviewLifecycle ? { review_lifecycle: reviewLifecycle } : {}),
       ...(condition ? { condition } : {}),
-      ...(condition === "after_user_confirms_goals" ? { requires_user_confirmation: true } : {}),
+      ...(USER_CONFIRMATION_CONDITIONS.has(condition) ? { requires_user_confirmation: true } : {}),
       ...context
     });
   }
@@ -367,7 +440,10 @@ function assertInput(input, allowedFields, requiredFields = []) {
     throw error;
   }
   const rendered = JSON.stringify(value);
-  if (Buffer.byteLength(rendered, "utf8") > 64 * 1024) {
+  const inputLimit = Object.prototype.hasOwnProperty.call(value, "feature_impact_manifest")
+    ? 256 * 1024
+    : 64 * 1024;
+  if (Buffer.byteLength(rendered, "utf8") > inputLimit) {
     const error = new Error("unclog_act input is too large.");
     error.code = "mcp_action_input_too_large";
     throw error;
@@ -377,6 +453,19 @@ function assertInput(input, allowedFields, requiredFields = []) {
     if (RESERVED_INPUT_KEYS.has(key) || !allowed.has(key)) {
       const error = new Error(`Input field ${key} is not authorized for the current action.`);
       error.code = "mcp_action_input_not_allowed";
+      throw error;
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (STRUCTURED_INPUT_FIELDS.has(key)) {
+      if (!child || typeof child !== "object" || Array.isArray(child)) {
+        const error = new Error(`unclog_act input field ${key} must be a JSON object.`);
+        error.code = "mcp_action_input_invalid";
+        throw error;
+      }
+    } else if (!["string", "number", "boolean"].includes(typeof child)) {
+      const error = new Error(`unclog_act input field ${key} must be a scalar value.`);
+      error.code = "mcp_action_input_invalid";
       throw error;
     }
   }
@@ -396,11 +485,7 @@ function assertInput(input, allowedFields, requiredFields = []) {
 function bindControlledInputToArgv(argv, values) {
   if (!Array.isArray(argv)) return;
   for (const [field, value] of Object.entries(values)) {
-    if (!["string", "number", "boolean"].includes(typeof value)) {
-      const error = new Error(`unclog_act input field ${field} must be a scalar value.`);
-      error.code = "mcp_action_input_invalid";
-      throw error;
-    }
+    if (STRUCTURED_INPUT_FIELDS.has(field)) continue;
     const flag = `--${String(field).replaceAll("_", "-")}`;
     const nextArgv = [];
     for (let index = 0; index < argv.length; index += 1) {
@@ -454,6 +539,15 @@ function createMcpRuntime(bridge, options = {}) {
   const now = options.now || (() => Date.now());
   const authorityCache = new Map();
 
+  function localProductState() {
+    if (typeof bridge.productStateIdentity !== "function") {
+      const error = new Error("This Unclog bridge cannot calculate the local product fingerprint.");
+      error.code = "mcp_product_state_unavailable";
+      throw error;
+    }
+    return bridge.productStateIdentity(workspaceRoot);
+  }
+
   function authorityKey(actorValue = {}) {
     const actor = actorIdentity(actorValue);
     return JSON.stringify(actor);
@@ -475,6 +569,7 @@ function createMcpRuntime(bridge, options = {}) {
     if (actor.mission_id) argv.push("--mission", actor.mission_id);
     const parsed = bridge.parseHostedCommandArgv(argv, { cwd: workspaceRoot });
     if (actor.agent_id && actor.focus) parsed.payload.focus = true;
+    parsed.payload.local_product_state = localProductState();
     const result = await client.command(parsed.command, parsed.payload);
     const returnedMission = String(result?.mission_id || result?.mission?.id || "").trim();
     const returnedAgent = String(result?.agent_id || result?.agent?.id || "").trim();
@@ -537,7 +632,7 @@ function createMcpRuntime(bridge, options = {}) {
           index = refreshedEquivalentIndex;
         }
         const sameVersion = projectVersion(previousAuthority.result) === projectVersion(current.result);
-        const confirmedMissionCreate = cachedDescriptor?.condition === "after_user_confirms_goals"
+        const confirmedMissionCreate = USER_CONFIRMATION_CONDITIONS.has(cachedDescriptor?.condition)
           && cachedDescriptor.requires_user_confirmation === true;
         const confirmedDraftGoalUpdate = cachedDescriptor?.condition === "after_matching_this_confirmed_draft_to_current_mission"
           && cachedDescriptor.command === "goals.update"
@@ -580,6 +675,16 @@ function createMcpRuntime(bridge, options = {}) {
       }
       const version = projectVersion(authority.result);
       if (version !== null) parsed.payload.expected_project_version = version;
+      // The command may use narrowly cached human-confirmed authority, but its
+      // optimistic lineage lock must always come from the fresh server read.
+      const currentLineageVersion = lineageVersion(current.result);
+      if (currentLineageVersion !== null) parsed.payload.expected_lineage_version = currentLineageVersion;
+      parsed.payload.local_product_state = localProductState();
+      for (const field of STRUCTURED_INPUT_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(controlledInput, field)) {
+          parsed.payload[field] = clone(controlledInput[field]);
+        }
+      }
       const result = await client.command(parsed.command, parsed.payload);
       const localArtifacts = bridge.applyHostedLocalArtifactEffects(result, { cwd: workspaceRoot });
       const localOutput = parsed.localOutputPath ? bridge.writeHostedOutputFile(parsed.localOutputPath, result, { cwd: workspaceRoot }) : null;
@@ -603,7 +708,8 @@ function createMcpRuntime(bridge, options = {}) {
       const firstFingerprint = JSON.stringify({
         code: first.result?.next_action?.code,
         actions: actionDescriptors(first.result, first.actor, deps).map((row) => row.action_id),
-        version: projectVersion(first.result)
+        version: projectVersion(first.result),
+        lineageVersion: lineageVersion(first.result)
       });
       if (actionDescriptors(first.result, first.actor, deps).length > 0 && input.wait_for_change !== true) {
         return publicMcpResult(first.result, first.actor, deps, { changed: false, timed_out: false });
@@ -615,7 +721,8 @@ function createMcpRuntime(bridge, options = {}) {
         const fingerprint = JSON.stringify({
           code: latest.result?.next_action?.code,
           actions: actionDescriptors(latest.result, latest.actor, deps).map((row) => row.action_id),
-          version: projectVersion(latest.result)
+          version: projectVersion(latest.result),
+          lineageVersion: lineageVersion(latest.result)
         });
         if (fingerprint !== firstFingerprint) {
           return publicMcpResult(latest.result, latest.actor, deps, { changed: true, timed_out: false });

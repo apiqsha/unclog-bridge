@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -17,7 +18,11 @@ const {
 
 function repository() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "unclog-mcp-"));
-  fs.mkdirSync(path.join(root, ".git"));
+  const initialized = childProcess.spawnSync("git", ["init", "--quiet", root], {
+    encoding: "utf8",
+    windowsHide: true
+  });
+  assert.equal(initialized.status, 0, initialized.stderr);
   return root;
 }
 
@@ -137,6 +142,7 @@ test("confirmed mission-create authority survives a stateless next refresh at th
   const intakeEnvelope = () => envelope("next", {
     mission_id: "",
     project: { id: "project-1", projectVersion: version },
+    feature_lineage: { lineage_version: 0 },
     next_action: { code: "GOAL_INTAKE_CONTINUE_LOCAL_DRAFT", message: "Lint the confirmed local draft." },
     commands_now: [`unclog --json goals lint --file "${file}"`]
   });
@@ -183,6 +189,7 @@ test("confirmed mission-create authority survives a stateless next refresh at th
   assert.equal(created.mission_id, "M001");
   assert.equal(mutations.length, 1);
   assert.equal(mutations[0].payload.expected_project_version, 0);
+  assert.equal(mutations[0].payload.expected_lineage_version, 0);
   assert.equal(mutations[0].payload.title, "Disposable queue lab");
   assert.equal(mutations[0].payload.cli_argv.includes("Disposable queue lab"), true);
   assert.equal(mutations[0].payload.cli_argv.includes("Compact mission title"), false);
@@ -767,6 +774,190 @@ test("unclog_wait is bounded and returns only after hosted state changes", async
   assert.equal(result.timed_out, false);
   assert.equal(result.allowed_actions[0].command, "agents.status");
   assert.ok(clock <= 10_000);
+});
+
+test("Feature Lineage lookups stay inside three MCP tools and stale when lineage advances", async () => {
+  const root = repository();
+  const featureId = `FTR_${"1".repeat(32)}`;
+  let lineageVersion = 7;
+  const executed = [];
+  const lineageEnvelope = () => envelope("next", {
+    project: { id: "project-1", projectVersion: 12 },
+    feature_context: {
+      schema: "unclog-task-feature-context/1",
+      lineage_version: lineageVersion,
+      capsule: {
+        schema: "unclog-feature-context-capsule/1",
+        lineage_version: lineageVersion,
+        feature: { feature_id: featureId, name: "Feature Lineage" },
+        origin: { event_id: `FLE_${"2".repeat(32)}`, summary: "Created to preserve why." },
+        available_lookups: ["origin_and_current", "paginated_timeline"]
+      },
+      trace_commands: [
+        {
+          command: `unclog --json lineage inspect --feature-id ${featureId}`,
+          feature_id: featureId,
+          lookup_kind: "origin_and_current",
+          lineage_version: lineageVersion
+        },
+        {
+          command: `unclog --json lineage timeline --feature-id ${featureId}`,
+          feature_id: featureId,
+          lookup_kind: "timeline",
+          lineage_version: lineageVersion
+        }
+      ]
+    },
+    commands_now: []
+  });
+  const client = {
+    async command(command, payload) {
+      if (command === "next") return lineageEnvelope();
+      executed.push({ command, payload });
+      return envelope(command, {
+        project: { id: "project-1", projectVersion: 12 },
+        lineage_version: lineageVersion,
+        feature_context: {
+          schema: "unclog-task-feature-context/1",
+          lineage_version: lineageVersion,
+          feature_id: featureId,
+          trace_commands: []
+        },
+        commands_now: []
+      });
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+
+  const initial = await runtime.next({ mission_id: "M001" });
+  assert.deepEqual(initial.allowed_actions.map((row) => row.command), [
+    "lineage.inspect",
+    "lineage.timeline"
+  ]);
+  assert.equal(initial.allowed_actions[0].feature_id, featureId);
+  assert.equal(initial.allowed_actions[0].lineage_version, 7);
+  assert.equal(initial.feature_context.trace_commands, undefined);
+  assert.equal(JSON.stringify(initial).includes("unclog --json lineage"), false);
+  const oldActionId = initial.allowed_actions[0].action_id;
+
+  lineageVersion = 8;
+  const stale = await runtime.act({
+    mission_id: "M001",
+    action_id: oldActionId
+  });
+  assert.equal(stale.code, "mcp_action_stale");
+  assert.equal(executed.length, 0);
+
+  const current = await runtime.next({ mission_id: "M001" });
+  const acted = await runtime.act({
+    mission_id: "M001",
+    action_id: current.allowed_actions[0].action_id
+  });
+  assert.equal(acted.code, undefined, JSON.stringify(acted));
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].command, "lineage.inspect");
+  assert.equal(executed[0].payload.feature_id, featureId);
+  assert.equal(executed[0].payload.expected_project_version, 12);
+  assert.equal(executed[0].payload.expected_lineage_version, 8);
+  assert.deepEqual(executed[0].payload.cli_argv, [
+    "lineage",
+    "inspect",
+    "--feature-id",
+    featureId
+  ]);
+  assert.deepEqual(
+    Object.keys(executed[0].payload.local_product_state).sort(),
+    ["branch_state", "fingerprint", "repository_ref", "schema", "source_mode"]
+  );
+  assert.match(executed[0].payload.local_product_state.repository_ref, /^RPO_[0-9a-f]{32}$/);
+  assert.match(executed[0].payload.local_product_state.fingerprint, /^[0-9a-f]{64}$/);
+});
+
+test("stale product context override is fixed to explicit user authority inside the three-tool path", async () => {
+  const root = repository();
+  const executed = [];
+  let reads = 0;
+  const overrideEnvelope = () => envelope("next", {
+    project: { id: "project-1", projectVersion: 12 },
+    feature_lineage: {
+      schema: "unclog-feature-product-state/1",
+      lineage_version: 7,
+      preflight_state: "observations_required",
+      actions: [
+        {
+          command: 'unclog --json mission create --title "Compact mission title" --stale-context-override-authority explicit_user',
+          condition: "after_user_explicitly_authorizes_stale_product_context",
+          lineage_version: 7
+        }
+      ]
+    },
+    commands_now: []
+  });
+  const refreshedEnvelope = () => envelope("next", {
+    project: { id: "project-1", projectVersion: 12 },
+    feature_lineage: {
+      schema: "unclog-feature-product-state/1",
+      lineage_version: 7,
+      preflight_state: "observations_required",
+      actions: []
+    },
+    commands_now: []
+  });
+  const client = {
+    async command(command, payload) {
+      if (command === "next") {
+        reads += 1;
+        return reads === 1 ? overrideEnvelope() : refreshedEnvelope();
+      }
+      executed.push({ command, payload });
+      return envelope(command, {
+        project: { id: "project-1", projectVersion: 13 },
+        lineage_version: 7,
+        commands_now: []
+      });
+    }
+  };
+  const runtime = createMcpRuntime(bridge, { workspaceRoot: root, client });
+
+  const current = await runtime.next();
+  assert.equal(current.allowed_actions.length, 1);
+  const action = current.allowed_actions[0];
+  assert.equal(action.command, "mission.create");
+  assert.equal(
+    action.condition,
+    "after_user_explicitly_authorizes_stale_product_context"
+  );
+  assert.equal(action.requires_user_confirmation, true);
+  assert.deepEqual(action.required_input, ["title"]);
+  assert.equal(action.lineage_version, 7);
+
+  const forged = await runtime.act({
+    action_id: action.action_id,
+    input: {
+      title: "Do not run",
+      stale_context_override_authority: "delegated_agent"
+    }
+  });
+  assert.equal(forged.code, "mcp_action_input_not_allowed");
+  assert.equal(executed.length, 0);
+
+  const created = await runtime.act({
+    action_id: action.action_id,
+    input: { title: "Accept known drift for this Mission" }
+  });
+  assert.equal(created.code, undefined, JSON.stringify(created));
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].command, "mission.create");
+  assert.equal(executed[0].payload.title, "Accept known drift for this Mission");
+  assert.equal(
+    executed[0].payload.stale_context_override_authority,
+    "explicit_user"
+  );
+  assert.equal(executed[0].payload.expected_lineage_version, 7);
+  assert.equal(
+    executed[0].payload.cli_argv.includes("delegated_agent"),
+    false
+  );
 });
 
 test("official MCP SDK client sees exactly three tools and server instructions", async () => {

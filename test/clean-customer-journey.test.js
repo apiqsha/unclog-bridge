@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -221,6 +222,7 @@ async function startHostedFixture(state) {
       state.closeoutReceived = payload.closeout_sweep?.closeout_sweep?.schema === "small-goal-closeout/2";
       state.phase = "validate";
     } else if (command === "mission.validate") {
+      state.featureImpactReceived = payload.feature_impact_manifest?.schema === "unclog-feature-impact-manifest/1";
       state.phase = "done";
       state.validated = true;
     }
@@ -252,7 +254,13 @@ test("fresh customer connects once then completes manager, cold-worker, proof, c
   const customerRepo = path.join(root, "customer-repo");
   const homeDir = path.join(root, "home");
   const bridgeHome = path.join(root, "bridge-home");
-  fs.mkdirSync(path.join(customerRepo, ".git"), { recursive: true });
+  fs.mkdirSync(customerRepo, { recursive: true });
+  childProcess.execFileSync("git", ["init", "--quiet"], { cwd: customerRepo });
+  childProcess.execFileSync(
+    "git",
+    ["-c", "user.name=Unclog Test", "-c", "user.email=unclog-test@example.invalid", "commit", "--allow-empty", "--quiet", "-m", "Initialize customer repository"],
+    { cwd: customerRepo }
+  );
   fs.mkdirSync(homeDir, { recursive: true });
   const state = {
     phase: "mission",
@@ -366,7 +374,46 @@ test("fresh customer connects once then completes manager, cold-worker, proof, c
     assert.equal(manager.allowed_actions[0].command, "mission.validate");
     manager = await act(manager, { mission_id: "M001" }, {
       summary: "The clean hosted customer lifecycle completed successfully.",
-      proof: "Accepted action proof and closeout evidence passed."
+      proof: "Accepted action proof and closeout evidence passed.",
+      feature_impact_manifest: {
+        schema: "unclog-feature-impact-manifest/1",
+        status: "accepted",
+        safe_summary: "The Mission introduced one proof-backed customer outcome.",
+        mutations: [{
+          idempotency_key: "clean-customer-outcome-origin",
+          event: {
+            event_id: `FLE_${"b".repeat(32)}`,
+            event_type: "introduced",
+            summary: "The clean hosted customer outcome was implemented and verified.",
+            source_kind: "mission",
+            assertion_level: "agent_inferred",
+            effective_time_kind: "exact",
+            effective_at: "2026-07-23T08:00:00Z",
+            intent_before: "unknown",
+            intent_after: "proposed",
+            implementation_before: "unknown",
+            implementation_after: "observed"
+          },
+          subjects: [{ feature_id: `FTR_${"a".repeat(32)}`, subject_role: "primary" }],
+          features: [{
+            feature_id: `FTR_${"a".repeat(32)}`,
+            node_kind: "feature",
+            origin_event_id: `FLE_${"b".repeat(32)}`,
+            name: "Clean hosted customer outcome",
+            purpose: "Complete a customer Mission through the three-tool bridge.",
+            audience_pain: "A customer needs one coherent path from intent to accepted proof."
+          }],
+          relations: [],
+          decisions: [],
+          reasoning: [],
+          links: {
+            missions: [{ mission_id: "M001", link_role: "origin" }],
+            goals: [{ mission_id: "M001", goal_id: "G001" }],
+            actions: [{ mission_id: "M001", action_id: "A001" }],
+            proofs: [{ mission_id: "M001", proof_id: "A001", link_role: "verifies" }]
+          }
+        }]
+      }
     });
     assert.equal(state.validated, true);
     assert.equal(manager.next_action.code, "MISSION_VALIDATED");
@@ -374,6 +421,7 @@ test("fresh customer connects once then completes manager, cold-worker, proof, c
     assert.equal(state.planReceived, true);
     assert.equal(state.proofReceived, true);
     assert.equal(state.closeoutReceived, true);
+    assert.equal(state.featureImpactReceived, true);
     assert.equal(state.calls.some((row) => row.command === "action.check" && row.payload.expected_project_version >= 1), true);
     assert.equal(state.calls.some((row) => JSON.stringify(row.payload).includes("session_token")), false);
     assert.equal(fs.existsSync(path.join(customerRepo, ".unclog", "state.json")), false);
